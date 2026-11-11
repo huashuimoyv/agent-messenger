@@ -1,0 +1,68 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { DeliveryError } from './io.mjs';
+
+export class Journal {
+  constructor(folder) {
+    fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+    this.db = new DatabaseSync(path.join(folder, 'messages.sqlite'));
+    this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
+      CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY, requestKey TEXT NOT NULL UNIQUE, fingerprint TEXT NOT NULL,
+        fromId TEXT NOT NULL, toId TEXT NOT NULL, fromClient TEXT NOT NULL, toClient TEXT NOT NULL,
+        sentAt INTEGER NOT NULL, chain TEXT NOT NULL, pass INTEGER NOT NULL,
+        kind TEXT NOT NULL, replyTo TEXT, replyId TEXT,
+        state TEXT NOT NULL, reason TEXT, anchor TEXT NOT NULL, turn TEXT
+      );
+      CREATE INDEX IF NOT EXISTS received ON messages(toId,sentAt DESC);
+      DELETE FROM messages WHERE sentAt < ${Date.now() - 7 * 86400000};`);
+  }
+  close() { this.db.close(); }
+  decode(row) { return row ? { ...row, anchor: JSON.parse(row.anchor) } : null; }
+  get(id) { return this.decode(this.db.prepare('SELECT * FROM messages WHERE id=?').get(id)); }
+  request(key) { return this.decode(this.db.prepare('SELECT * FROM messages WHERE requestKey=?').get(key)); }
+  received(to) { return this.db.prepare('SELECT * FROM messages WHERE toId=? AND state<>? ORDER BY sentAt DESC,rowid DESC').all(to, 'refused').map(r => this.decode(r)); }
+
+  // Commit the intent before any external bytes can leave. A second MCP process
+  // sees the reservation and returns it instead of submitting another prompt.
+  reserve(record) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const old = this.request(record.requestKey);
+      if (old) {
+        if (old.fingerprint !== record.fingerprint) throw new DeliveryError('request_id was already used with different content. Choose a new request_id.');
+        this.db.exec('COMMIT');
+        return { record: old, created: false };
+      }
+      const fields = Object.keys(record);
+      this.db.prepare(`INSERT INTO messages (${fields.join(',')}) VALUES (${fields.map(() => '?').join(',')})`)
+        .run(...fields.map(k => k === 'anchor' ? JSON.stringify(record[k]) : record[k]));
+      this.db.exec('COMMIT');
+      return { record: this.get(record.id), created: true };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  update(id, patch) {
+    const fields = Object.keys(patch);
+    if (!fields.length) return this.get(id);
+    const allowed = new Set(['state', 'reason', 'anchor', 'turn', 'replyId', 'toId']);
+    for (const key of fields) if (!allowed.has(key)) throw new Error(`Invalid journal field: ${key}`);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const old = this.get(id);
+      const rank = { uncertain: 0, queued: 1, taken: 2, started: 3, done: 4 };
+      if (patch.state in rank && old.state in rank && rank[patch.state] < rank[old.state]) {
+        delete patch.state; delete patch.reason;
+      }
+      const keys = Object.keys(patch);
+      if (keys.length) this.db.prepare(`UPDATE messages SET ${keys.map(k => `${k}=?`).join(',')} WHERE id=?`)
+        .run(...keys.map(k => k === 'anchor' ? JSON.stringify(patch[k]) : patch[k]), id);
+      this.db.exec('COMMIT');
+      return this.get(id);
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  settleReply(parent, reply) {
+    this.db.prepare('UPDATE messages SET replyId=COALESCE(replyId,?) WHERE id=?').run(reply, parent);
+  }
+}

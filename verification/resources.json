@@ -1,0 +1,22 @@
+{
+  "node": "v24.9.0",
+  "bundleBytes": 834036,
+  "initializeMs": 126,
+  "initialized": {
+    "workingSet": 68722688,
+    "privateBytes": 51503104,
+    "cpuSeconds": 0.140625
+  },
+  "idleAfterThreeSeconds": {
+    "workingSet": 68722688,
+    "privateBytes": 51503104,
+    "cpuSeconds": 0.140625
+  },
+  "idleCpuSeconds": 0,
+  "afterDiscovery": {
+    "workingSet": 83800064,
+    "privateBytes": 91705344,
+    "cpuSeconds": 0.53125
+  },
+  "note": "Single Windows sample of the MCP process only. Client applications and temporary discovery/app-server helpers are excluded."
+}

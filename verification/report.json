@@ -1,0 +1,115 @@
+{
+  "date": "2026-11-11",
+  "upstream_commit": "d14bc43fe117f2f5d4e9143d5ebcf92c62225a66",
+  "artifacts": [
+    {
+      "path": "E:\\Ameath\\agent-messenger\\dist\\agent-messenger.mjs",
+      "bytes": 834036,
+      "sha256": "0a66a106ed2bef89e2a5b6f57d55c2683e6108c726eee39ee15ba01d8aaf0142"
+    },
+    {
+      "path": "E:\\Ameath\\agent-messenger\\dist\\agent-messenger-runtime.zip",
+      "bytes": 209618,
+      "sha256": "347d256317dbc504172b0b234926c04dcf6b18fbbc8b029bfff853c59c786bae"
+    }
+  ],
+  "tests": {
+    "total": 30,
+    "passed": 29,
+    "failed": 0,
+    "skipped": 1
+  },
+  "resources": {
+    "node": "v24.9.0",
+    "bundleBytes": 834036,
+    "initializeMs": 126,
+    "initialized": {
+      "workingSet": 68722688,
+      "privateBytes": 51503104,
+      "cpuSeconds": 0.140625
+    },
+    "idleAfterThreeSeconds": {
+      "workingSet": 68722688,
+      "privateBytes": 51503104,
+      "cpuSeconds": 0.140625
+    },
+    "idleCpuSeconds": 0,
+    "afterDiscovery": {
+      "workingSet": 83800064,
+      "privateBytes": 91705344,
+      "cpuSeconds": 0.53125
+    },
+    "note": "Single Windows sample of the MCP process only. Client applications and temporary discovery/app-server helpers are excluded."
+  },
+  "live": {
+    "antigravity": {
+      "send": "m-9c25f1e9c09e",
+      "reply": "m-29a3eae4922c",
+      "state": "done",
+      "explicit_reply_reached_current_codex_chat": true,
+      "full_final_answer_captured": true
+    },
+    "codex": {
+      "desktop_runtime_start": "m-b2e9cefb6923",
+      "desktop_runtime_answer": "AM_SMOKE_CODEX_LEGACY_20261111",
+      "default_cli_start": "m-225c22509578",
+      "default_cli_explicit_reply": "m-e6db4bb7208c",
+      "state": "done",
+      "new_thread_history_mode": "legacy",
+      "default_cli_explicit_reply_reached_current_chat": true
+    },
+    "separate_mcp_processes": {
+      "duplicate_request_returned_same_message_id": true,
+      "id": "m-9c25f1e9c09e"
+    },
+    "paginated_history": {
+      "current_chat_read_only_status_and_prompt_verified": true,
+      "exact_turn_and_final_item_fixture_tests": true
+    },
+    "claude": "plugin and adapter fixture tests only; not installed for live messaging",
+    "deepseek": "plugin and adapter fixtures plus existing compressed transcript read; not installed for live messaging"
+  },
+  "configuration": {
+    "codex": "C:\\Users\\Ameath\\.codex\\config.toml",
+    "antigravity": "C:\\Users\\Ameath\\.gemini\\config\\mcp_config.json",
+    "backups": [
+      "C:\\Users\\Ameath\\.codex\\config.toml.agent-messenger-20261111-113009.bak",
+      "C:\\Users\\Ameath\\.gemini\\config\\mcp_config.json.agent-messenger-20261111-113009.bak"
+    ],
+    "all_other_entries_preserved_and_read_back_at_install": true,
+    "other_top_level_codex_settings_still_match_backup": true,
+    "later_changed_other_mcp_keys": [
+      "node_repl"
+    ],
+    "later_drift_note": "node_repl differs from the installation backup; the installer preserved it and this task did not rewrite that entry or revert later changes.",
+    "hooks_sha256_unchanged": "149E180F36428838962E0C79E02B94642E6B56DB9414946ADBB6F1D2C8829B1D",
+    "old_hud_mcp_entries_absent": true,
+    "approval_sandbox_and_model_settings_not_changed": true
+  },
+  "review": {
+    "architect": "passed; final rebuild and 29 tests passed by main agent",
+    "antigravity_handoff": {
+      "id": "m-756d84a2561b",
+      "state": "done",
+      "reply_to": "m-29a3eae4922c",
+      "scope": "read-only implementation review requested by user",
+      "reply": "m-f620d6519f29",
+      "result": "read-only acceptance passed",
+      "verified_by_reviewer": [
+        "artifact hashes",
+        "four-tool MCP contract",
+        "29 passing tests",
+        "headless architecture and resource measurements",
+        "idempotency and pass limit",
+        "both client configurations and backups"
+      ]
+    }
+  },
+  "limitations": [
+    "start_session supports Codex only",
+    "Claude Code and DeepSeek Harness require their standalone plugins; no live send test was performed",
+    "Antigravity busy/unknown-turn ordinary answers cannot be safely correlated; explicit reply_to is supported",
+    "An empty paginated metadata row from the failed prototype remains; its pending queue input was removed and no model turn ran. Client databases were not edited directly.",
+    "The original HUD installation and its existing hooks were preserved."
+  ]
+}

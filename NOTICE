@@ -1,0 +1,10 @@
+Agent Messenger
+
+Contains adapted protocol and plugin code from Agent HUD Open:
+https://github.com/jazzenchen/agent-hud-open
+Commit: d14bc43fe117f2f5d4e9143d5ebcf92c62225a66
+Copyright the Agent HUD contributors. Licensed under Apache License 2.0.
+
+Adaptations: standalone Node.js messaging service; removal of application/UI,
+quota, token statistics, approval and question interception; independent durable
+journal and plugin channels; client adapters and MCP transport.

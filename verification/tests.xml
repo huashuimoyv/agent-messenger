@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+	<testcase name="lists transcripts with canonical ids, workspace and state" time="0.011761" classname="test"/>
+	<testcase name="delivers once to the cascade owner and reads its matching completed turn" time="0.012928" classname="test"/>
+	<testcase name="does not guess the answer for an enqueue made during an active turn" time="0.006237" classname="test"/>
+	<testcase name="an empty or failed terminal response ends the matched turn" time="0.006622" classname="test"/>
+	<testcase name="returns unknown for a stale unfinished turn and refuses to correlate it" time="0.006885" classname="test"/>
+	<testcase name="matches only the envelope header, not an id mentioned in ordinary text" time="0.007765" classname="test"/>
+	<testcase name="marks an unconfirmed send uncertain and never retries it" time="0.005464" classname="test"/>
+	<testcase name="optional live test performs only read-only language-server calls" time="0.000069" classname="test">
+		<skipped type="skipped" message="true"/>
+	</testcase>
+	<testcase name="Claude final answer belongs to the marked turn, excludes later replies and request copies" time="0.015077" classname="test"/>
+	<testcase name="DeepSeek compressed concatenated frames bind exact turn and ignore time context" time="0.011707" classname="test"/>
+	<testcase name="plugin confirmation is readable after 60 seconds without any HUD maintenance" time="0.013246" classname="test"/>
+	<testcase name="stripped DeepSeek plugin queues once, records caller and has no approval hooks" time="0.016311" classname="test"/>
+	<testcase name="paginated replies bind the exact envelope turn and final item" time="0.031380" classname="test"/>
+	<testcase name="paginated running and empty failed turns stay distinct from another turn answer" time="0.019814" classname="test"/>
+	<testcase name="Codex adapter reads a paginated session without a rollout file" time="0.020237" classname="test"/>
+	<testcase name="discovers main threads from the read-only state database and reads lifecycle state" time="0.027538" classname="test"/>
+	<testcase name="capture anchors at the last complete line and read waits for the exact turn completion" time="0.015333" classname="test"/>
+	<testcase name="current prompt is bound to the requested Codex turn" time="0.013775" classname="test"/>
+	<testcase name="a target abort with no answer cannot borrow a later turn final answer" time="0.012450" classname="test"/>
+	<testcase name="decompresses Codex rollout archives with an uncompressed byte cursor" time="0.011954" classname="test"/>
+	<testcase name="delivery uses app-server JSON-RPC; start queues then wakes while preserving the thread id" time="0.010251" classname="test"/>
+	<testcase name="existing-thread delivery reports a confirmed queue receipt" time="0.014201" classname="test"/>
+	<testcase name="app-server startup errors are refused and an EPIPE after queue write stays uncertain" time="3.032763" classname="test"/>
+	<testcase name="two MCP owners reserve the same request once; conflicting retry is refused" time="0.014192" classname="test"/>
+	<testcase name="ACK loss remains uncertain across owners and never resends the request" time="0.011308" classname="test"/>
+	<testcase name="pass 11 is refused; unreadable transcript keeps chain; real user prompt resets it" time="0.024233" classname="test"/>
+	<testcase name="reply ownership and sender ownership; explicit and final answer survive other state updates" time="0.013333" classname="test"/>
+	<testcase name="identity comes from MCP metadata, not a model-written argument" time="0.000634" classname="test"/>
+	<testcase name="JSONL cursor preserves an unfinished line and a split UTF-8 character" time="0.005948" classname="test"/>
+	<testcase name="real stdio server initializes, lists exactly four tools, validates input and rejects anonymous writes" time="0.182340" classname="test"/>
+	<!-- tests 30 -->
+	<!-- suites 0 -->
+	<!-- pass 29 -->
+	<!-- fail 0 -->
+	<!-- cancelled 0 -->
+	<!-- skipped 1 -->
+	<!-- todo 0 -->
+	<!-- duration_ms 3328.2336 -->
+</testsuites>

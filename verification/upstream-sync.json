@@ -1,0 +1,16 @@
+{
+  "checked_at": "2026-11-11T11:59:57.078Z",
+  "upstream_url": "https://github.com/jazzenchen/agent-hud-open.git",
+  "baseline_commit": "d14bc43fe117f2f5d4e9143d5ebcf92c62225a66",
+  "latest_commit": "6d259bcde5d9d53c78ef09ee7ccd632976467cb6",
+  "total_new_commits": 8,
+  "messaging_commits_count": 5,
+  "messaging_commits": [
+    "ef6e91b Install Cursor's prompt, tool and reply hooks beside its stop",
+    "df61802 Read a Cursor turn's reply from its transcript",
+    "a373dc7 Name a TRAE caller through the app's own processes",
+    "78aefad Say where the running copy is when hooks or HUD tools need the installed app",
+    "37a273c Support TRAE, WorkBuddy, Qoder, ZCode and Kimi Code, and message them through their own hooks"
+  ],
+  "has_messaging_updates": true
+}
