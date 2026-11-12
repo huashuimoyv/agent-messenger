@@ -4,9 +4,12 @@ import { z } from 'zod/v4';
 import { configuration } from './config.mjs';
 import { Messenger } from './messenger.mjs';
 import { createAdapters } from './adapters/index.mjs';
+import { startDashboardServer } from './dashboard-server.mjs';
 
 const config = configuration();
-const messenger = new Messenger(config, createAdapters(config));
+const adapters = createAdapters(config);
+const messenger = new Messenger(config, adapters);
+const dashboard = startDashboardServer({ config, adapters });
 const clientEnum = z.enum(messenger.clientNames);
 const text = z.string().refine(value => Boolean(value.trim()), 'text must not be empty');
 const request_id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional()
@@ -52,6 +55,10 @@ const handle = serveStdio(() => {
   return server;
 }, { onerror: error => process.stderr.write(`agent-messenger: ${error.message}\n`) });
 
-async function shutdown() { await handle.close(); messenger.close(); }
+async function shutdown() {
+  dashboard?.close();
+  await handle.close();
+  messenger.close();
+}
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
