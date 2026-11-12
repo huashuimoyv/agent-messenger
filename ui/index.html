@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Messenger</title>
+<style>
+:root{
+  --bg:#f6f5f2; --surface:#ffffff; --surface-2:#faf9f7; --hover:#f3f2ee;
+  --line:#ebe8e2; --line-2:#dfdbd3;
+  --text:#1c1b19; --text-2:#5d5952; --text-3:#9b968c;
+  --ok:#18935a; --run:#2f66f0; --wait:#9b968c; --warn:#c58410; --err:#d4443e;
+  --ag:#3a68ec; --cx:#1c1b19; --pi:#e06a2a;
+  --r:14px; --r-sm:9px;
+  --shadow:0 1px 2px rgba(28,27,25,.04),0 8px 24px -16px rgba(28,27,25,.18);
+  --sans:"Inter","Segoe UI Variable Text","Segoe UI","PingFang SC","Microsoft YaHei UI",system-ui,sans-serif;
+  --mono:"JetBrains Mono","Cascadia Code","SF Mono",Consolas,monospace;
+  color-scheme:light;
+}
+[data-theme=dark]{
+  --bg:#0f0f11; --surface:#17171a; --surface-2:#1c1c20; --hover:#1f1f23;
+  --line:#26262b; --line-2:#323238;
+  --text:#ececee; --text-2:#a4a4aa; --text-3:#6b6b72;
+  --ok:#3cc488; --run:#6b93ff; --wait:#6b6b72; --warn:#e2a93b; --err:#f06a64;
+  --ag:#6b93ff; --cx:#ececee; --pi:#f08a4f;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px -16px rgba(0,0,0,.6);
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font:14px/1.55 var(--sans);-webkit-font-smoothing:antialiased;transition:background .25s,color .25s}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+code,.mono{font-family:var(--mono);font-size:12px;letter-spacing:-.01em}
+ul,ol{list-style:none}
+
+.app{max-width:1320px;margin:0 auto;padding:28px 36px 20px;height:100vh;min-height:620px;display:flex;flex-direction:column;gap:20px}
+
+/* header */
+.top{display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:12px}
+.mark{width:32px;height:32px;border-radius:10px;background:var(--text);display:grid;place-items:center}
+.mark svg{width:18px;height:18px;stroke:var(--bg);fill:none;stroke-width:2;stroke-linecap:round}
+.brand b{display:block;font-size:15px;font-weight:600;letter-spacing:-.01em}
+.brand span{display:block;font-size:12px;color:var(--text-3);margin-top:-1px}
+.top-right{display:flex;align-items:center;gap:10px}
+.conn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);font-size:12px;color:var(--text-2)}
+.conn i{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 18%,transparent)}
+.conn.demo i{background:transparent;border:1.5px solid var(--warn);box-shadow:none}
+.icon-btn{width:32px;height:32px;border-radius:999px;border:1px solid var(--line);background:var(--surface);display:grid;place-items:center;color:var(--text-2);transition:color .15s,border-color .15s}
+.icon-btn:hover{color:var(--text);border-color:var(--line-2)}
+.icon-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+/* agents */
+.agents{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.agent{position:relative;overflow:hidden;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px 14px;box-shadow:var(--shadow)}
+.agent-top{display:flex;align-items:center;gap:12px}
+.av{--c:var(--text-3);flex:none;display:grid;place-items:center;width:34px;height:34px;border-radius:10px;font:600 11.5px/1 var(--sans);letter-spacing:.02em;color:var(--c);background:color-mix(in srgb,var(--c) 11%,transparent)}
+.av.sm{width:22px;height:22px;border-radius:7px;font-size:9.5px}
+.agent-id{flex:1;min-width:0}
+.agent-id b{display:block;font-weight:600;font-size:14px}
+.agent-id span{display:block;font-size:12px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.status{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2)}
+.status i{width:7px;height:7px;border-radius:50%;background:var(--wait)}
+.status.idle i{background:var(--ok)}
+.status.running i{background:var(--run);animation:pulse 1.8s infinite}
+.status.offline{color:var(--text-3)}
+.status.offline i{background:transparent;border:1.5px solid var(--wait)}
+.agent-meta{display:flex;justify-content:space-between;gap:12px;margin-top:14px;padding-top:12px;border-top:1px dashed var(--line);font-size:12px;color:var(--text-3)}
+.agent-meta .mono{color:var(--text-2);font-size:11.5px}
+.agent-bar{position:absolute;left:0;right:0;bottom:0;height:2px;overflow:hidden}
+.agent.running .agent-bar::after{content:"";position:absolute;inset:0;width:28%;background:linear-gradient(90deg,transparent,var(--run),transparent);animation:slide 1.9s ease-in-out infinite}
+
+/* board */
+.board{flex:1;min-height:0;display:grid;grid-template-columns:400px 1fr;gap:14px}
+.pane{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.pane-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 12px;border-bottom:1px solid var(--line)}
+.pane-head h2{font-size:13px;font-weight:600}
+.tabs{display:flex;gap:2px;padding:3px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px}
+.tab{height:26px;padding:0 10px;border-radius:7px;font-size:12px;color:var(--text-3);display:inline-flex;align-items:center;gap:6px;transition:color .15s,background .15s}
+.tab:hover{color:var(--text-2)}
+.tab.on{background:var(--surface);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.06),0 0 0 1px var(--line)}
+.tab em{font-style:normal;font-size:11px;color:var(--text-3)}
+
+.tasks{flex:1;overflow:auto;padding:6px}
+.task{position:relative;padding:12px 12px 12px 14px;border-radius:var(--r-sm);cursor:pointer;transition:background .15s}
+.task+.task{margin-top:2px}
+.task:hover{background:var(--hover)}
+.task.on{background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line)}
+.task.on::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:2.5px;border-radius:2px;background:var(--text)}
+.row{display:flex;align-items:center;gap:8px}
+.route{display:inline-flex;align-items:center;gap:5px;color:var(--text-3)}
+.route svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.task time{margin-left:auto;font-size:11.5px;color:var(--text-3)}
+.task-title{margin:7px 0 9px;font-weight:500;font-size:13.5px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.mini{display:inline-flex;gap:3px}
+.mini i{width:14px;height:4px;border-radius:2px;background:var(--line-2)}
+.mini i.d{background:var(--tone)}
+.mini i.a{background:var(--tone);animation:blink 1.4s ease-in-out infinite}
+.mini i.f{background:var(--err)}
+.t-err .mini i.d,.t-warn .mini i.d{background:var(--text-3)}
+.state-label{font-size:12px;color:var(--tone)}
+.pass{margin-left:auto;color:var(--text-3);font-size:11px}
+.empty{padding:48px 16px;text-align:center;color:var(--text-3);font-size:13px}
+
+/* tones */
+.t-ok{--tone:var(--ok)} .t-run{--tone:var(--run)} .t-wait{--tone:var(--text-2)} .t-warn{--tone:var(--warn)} .t-err{--tone:var(--err)}
+.pill{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:999px;font-size:11.5px;color:var(--tone);background:color-mix(in srgb,var(--tone) 10%,transparent)}
+.pill::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
+
+/* detail */
+.detail{overflow:auto}
+.d-wrap{padding:26px 30px 30px;max-width:820px}
+.d-route{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-2)}
+.d-route svg{width:13px;height:13px;stroke:var(--text-3);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.d-title{margin:12px 0 8px;font-size:21px;line-height:1.35;font-weight:600;letter-spacing:-.015em}
+.d-meta{display:flex;align-items:center;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--text-3)}
+.d-meta .sep{width:3px;height:3px;border-radius:50%;background:var(--line-2)}
+.copy{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border-radius:7px;border:1px solid var(--line);color:var(--text-2);transition:border-color .15s,color .15s}
+.copy:hover{border-color:var(--line-2);color:var(--text)}
+.copy svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+.stepper{display:grid;grid-template-columns:repeat(4,1fr);margin:28px 0 24px;padding:20px 8px 18px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface-2)}
+.step{position:relative;display:flex;flex-direction:column;align-items:center;text-align:center}
+.step::before{content:"";position:absolute;top:11px;right:50%;width:100%;height:2px;background:var(--line-2);z-index:0}
+.step:first-child::before{display:none}
+.step.fill::before{background:var(--tone)}
+.step.fail-line::before{background:linear-gradient(90deg,var(--text-3),var(--err))}
+.t-err .step.done .node,.t-warn .step.done .node{background:var(--text-3);border-color:var(--text-3)}
+.t-err .step.fill::before,.t-warn .step.fill::before{background:var(--text-3)}
+.node{position:relative;z-index:1;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;background:var(--surface);border:2px solid var(--line-2);color:var(--surface)}
+.node svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.step.done .node{background:var(--tone);border-color:var(--tone)}
+.step.active .node{border-color:var(--tone);animation:pulse-tone 1.8s infinite}
+.step.active .node::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--tone)}
+.step.failed .node{background:var(--err);border-color:var(--err)}
+.step b{margin-top:10px;font-size:12.5px;font-weight:600;color:var(--text)}
+.step.pending b{color:var(--text-3);font-weight:500}
+.step small{margin-top:2px;font-size:11.5px;color:var(--text-3);min-height:17px}
+.step.active small{color:var(--tone)}
+.step.failed small{color:var(--err)}
+
+.stats{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.stat{padding:14px 16px}
+.stat+.stat{border-left:1px solid var(--line)}
+.stat label{display:block;font-size:11.5px;color:var(--text-3);margin-bottom:6px}
+.stat strong{font-size:17px;font-weight:600;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.stat strong span{font-size:12px;font-weight:400;color:var(--text-3);margin-left:3px}
+.ticks{display:flex;gap:3px;margin-top:8px}
+.ticks i{flex:1;height:4px;border-radius:2px;background:var(--line)}
+.ticks i.on{background:var(--text-2)}
+
+.sec-h{display:flex;align-items:center;justify-content:space-between;margin:30px 0 14px;font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:.02em}
+.sec-h span{font-weight:400;color:var(--text-3)}
+.tl{position:relative}
+.tl-item{position:relative;padding:0 0 22px 34px}
+.tl-item::before{content:"";position:absolute;left:10px;top:24px;bottom:2px;width:1px;background:var(--line)}
+.tl-item:last-child{padding-bottom:0}
+.tl-item:last-child::before{display:none}
+.tl-item .av{position:absolute;left:0;top:0}
+.tl-head{display:flex;align-items:center;gap:8px;min-height:22px;font-size:13px}
+.tl-head b{font-weight:600}
+.tl-head .to{color:var(--text-3)}
+.tl-head time{margin-left:auto;font-size:11.5px;color:var(--text-3)}
+.tl-sub{margin-top:2px;font-size:11px;color:var(--text-3)}
+.tl-text{margin-top:10px;padding:12px 14px;border-radius:var(--r-sm);background:var(--surface-2);border:1px solid var(--line);color:var(--text);font-size:13px;line-height:1.65;word-break:break-word}
+.tl-reason{margin-top:8px;padding:10px 12px;border-radius:var(--r-sm);font:12px/1.55 var(--mono);color:var(--err);background:color-mix(in srgb,var(--err) 7%,transparent);border:1px solid color-mix(in srgb,var(--err) 18%,transparent)}
+.tl-answer{margin-top:8px;padding:10px 14px;border-left:2px solid var(--ok);font-size:13px;color:var(--text-2)}
+.tl-answer label{display:block;font-size:11px;color:var(--ok);margin-bottom:2px}
+
+.foot{display:flex;justify-content:space-between;gap:16px;font-size:11.5px;color:var(--text-3)}
+.foot code{font-size:11px}
+
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--run) 45%,transparent)}70%,100%{box-shadow:0 0 0 6px transparent}}
+@keyframes pulse-tone{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--tone) 35%,transparent)}70%,100%{box-shadow:0 0 0 7px transparent}}
+@keyframes blink{50%{opacity:.35}}
+@keyframes slide{from{transform:translateX(-110%)}to{transform:translateX(380%)}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+@media (max-width:980px){
+  .app{padding:20px 16px;height:auto}
+  .agents{grid-template-columns:1fr}
+  .board{grid-template-columns:1fr}
+  .pane{max-height:none}
+  .d-wrap{padding:20px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <div class="mark"><svg viewBox="0 0 24 24"><path d="M4 8.5h15M15 4.5l4 4-4 4M20 15.5H5M9 11.5l-4 4 4 4"/></svg></div>
+      <div><b>Agent Messenger</b><span>本地智能体互发</span></div>
+    </div>
+    <div class="top-right">
+      <span class="conn demo" id="conn"><i></i><span>示例数据</span></span>
+      <button class="icon-btn" id="theme" title="切换主题" aria-label="切换主题"></button>
+    </div>
+  </header>
+
+  <section class="agents" id="agents"></section>
+
+  <section class="board">
+    <div class="pane">
+      <div class="pane-head">
+        <h2>任务</h2>
+        <div class="tabs" id="tabs"></div>
+      </div>
+      <ul class="tasks" id="tasks"></ul>
+    </div>
+    <div class="pane detail" id="detail"></div>
+  </section>
+
+  <footer class="foot">
+    <span>数据源 <code>%LOCALAPPDATA%\agent-messenger\messages.sqlite</code> · 保留 7 天</span>
+    <span>单条链路上限 10 轮 · ↑ ↓ 切换任务</span>
+  </footer>
+</div>
+
+<script>
+const ENDPOINT = '/api/state';
+const POLL_MS = 3000;
+
+const AGENTS = {
+  antigravity: { name: 'Antigravity', short: 'AG', color: 'var(--ag)' },
+  codex:       { name: 'Codex',       short: 'CX', color: 'var(--cx)' },
+  pi:          { name: 'Pi',          short: 'PI', color: 'var(--pi)' },
+};
+const STATE = {
+  queued:    { label: '排队中', tone: 'wait', cur: 1 },
+  taken:     { label: '已送达', tone: 'run',  cur: 2 },
+  started:   { label: '执行中', tone: 'run',  cur: 2 },
+  done:      { label: '已完成', tone: 'ok',   cur: 4 },
+  replied:   { label: '已回信', tone: 'ok',   cur: 4 },
+  uncertain: { label: '待确认', tone: 'warn', cur: 1, fail: true },
+  refused:   { label: '已拒绝', tone: 'err',  cur: 1, fail: true },
+  expired:   { label: '已过期', tone: 'err',  cur: 2, fail: true },
+};
+const ACTIVE = new Set(['queued', 'taken', 'started', 'uncertain']);
+const FILTERS = [
+  { key: 'all',  label: '全部',   test: () => true },
+  { key: 'live', label: '进行中', test: s => ACTIVE.has(s) },
+  { key: 'done', label: '已完成', test: s => s === 'done' || s === 'replied' },
+  { key: 'err',  label: '异常',   test: s => s === 'refused' || s === 'expired' },
+];
+const STEPS = ['发送', '送达', '执行', '完成'];
+const ICON = {
+  arrow: '<svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  x:     '<svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg>',
+  copy:  '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8"/></svg>',
+  sun:   '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4L6 18M18 6l1.4-1.4"/></svg>',
+  moon:  '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>',
+};
+
+/* ---------- demo data (same shape as messages table + optional text/answer/title) ---------- */
+function demo() {
+  const now = Date.now(), m = 60e3, h = 60 * m;
+  return {
+    passLimit: 10,
+    sessions: [
+      { id: 'antigravity:a91282d6', client: 'antigravity', model: 'Gemini 3.8 Flash', workspace: 'E:\\Ameath', state: 'idle', reachable: true },
+      { id: 'codex:019a6c2e',       client: 'codex',       model: 'GPT-6.1 Sol',      workspace: 'E:\\Ameath', state: 'running', reachable: true },
+      { id: 'pi:5f0b31d2',          client: 'pi',          model: 'Gemini 4 Carbon',  workspace: 'E:\\Ameath', state: 'running', reachable: true },
+    ],
+    messages: [
+      { id: 'm-e14c0a3b5d77', fromClient: 'antigravity', toClient: 'codex', sentAt: now - 2.7 * m, chain: 'm-e14c0a3b5d77', pass: 1, kind: 'send', state: 'queued',
+        title: '同步 Pi 适配器变更，更新 AUDIT.md',
+        text: 'Pi 适配器已改为按 ppid 识别调用方，忙碌时走 followUp 投递。请据此更新 docs/AUDIT.md 中的身份识别章节。' },
+      { id: 'm-7f3a1c09b2e4', fromClient: 'antigravity', toClient: 'pi', sentAt: now - 6.2 * m, chain: 'm-7f3a1c09b2e4', pass: 1, kind: 'send', state: 'started',
+        title: '回归测试 Carbon 优化后的互发代码',
+        text: 'Carbon 已完成 channel-store 与适配器拆分。请在 E:\\Ameath\\agent-messenger 运行 npm test 与 microkernel-and-perf 用例，确认三端互发无回归，结果回信给我。' },
+      { id: 'm-c834d43ffc75', fromClient: 'pi', toClient: 'antigravity', sentAt: now - 70 * m, chain: 'm-c834d43ffc75', pass: 1, kind: 'send', state: 'replied', replyId: 'm-5d71764529e1',
+        title: 'MCP 互发复测',
+        text: '你好 Antigravity！这是一条来自 Pi 的 MCP 互发复测消息，收到后请简短回复确认连接正常。' },
+      { id: 'm-5d71764529e1', fromClient: 'antigravity', toClient: 'pi', sentAt: now - 69 * m, chain: 'm-c834d43ffc75', pass: 2, kind: 'send', replyTo: 'm-c834d43ffc75', state: 'done',
+        text: '收到。Pi → Antigravity 链路正常，身份识别与回信均已通过。' },
+      { id: 'm-2b90e4d1a7c3', fromClient: 'pi', toClient: 'antigravity', sentAt: now - 74 * m, chain: 'm-2b90e4d1a7c3', pass: 1, kind: 'send', state: 'refused',
+        title: 'Pi 首次互发测试',
+        text: '你好 Antigravity，这是来自 Pi 的互发测试。',
+        reason: 'The client did not identify this session.' },
+      { id: 'm-756d84a2561b', fromClient: 'codex', toClient: 'antigravity', sentAt: now - 30.9 * h, chain: 'm-756d84a2561b', pass: 1, kind: 'send', state: 'replied', replyId: 'm-f620d6519f29',
+        title: 'Agent Messenger 实现交付，请只读检查',
+        text: '已完成实现和配置接入。单文件服务 dist/agent-messenger.mjs 运行无需 node_modules，仅暴露 list_sessions、send_message、get_message、start_session 四个工具。' },
+      { id: 'm-f620d6519f29', fromClient: 'antigravity', toClient: 'codex', sentAt: now - 30.6 * h, chain: 'm-756d84a2561b', pass: 2, kind: 'send', replyTo: 'm-756d84a2561b', state: 'done',
+        text: '只读检查通过：协议、熔断与幂等实现符合计划，另附 3 条改进建议。' },
+      { id: 'm-9c25f1e9c09e', fromClient: 'codex', toClient: 'antigravity', sentAt: now - 31.3 * h, chain: 'm-9c25f1e9c09e', pass: 1, kind: 'send', state: 'done',
+        title: '冒烟测试',
+        text: 'Authorized Agent Messenger smoke test. Please answer with exactly AM_SMOKE_AG_20261111_1134.',
+        answer: 'AM_SMOKE_AG_20261111_1134' },
+    ],
+  };
+}
+
+/* ---------- helpers ---------- */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const agent = c => AGENTS[c] || { name: c, short: String(c).slice(0, 2).toUpperCase(), color: 'var(--text-3)' };
+const st = s => STATE[s] || { label: s, tone: 'wait', cur: 0 };
+const av = (c, sm) => { const a = agent(c); return `<span class="av${sm ? ' sm' : ''}" style="--c:${a.color}">${a.short}</span>`; };
+const pad = n => String(n).padStart(2, '0');
+function clock(ts, sec) { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}${sec ? ':' + pad(d.getSeconds()) : ''}`; }
+function rel(ts) {
+  const s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 45) return '刚刚';
+  if (s < 3600) return `${Math.round(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  const d = new Date(ts), y = new Date(); y.setDate(y.getDate() - 1);
+  return d.toDateString() === y.toDateString() ? `昨天 ${clock(ts)}` : `${d.getMonth() + 1}月${d.getDate()}日`;
+}
+function elapsed(ts) {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  const h = Math.floor(s / 3600), mm = Math.floor(s / 60) % 60, ss = s % 60;
+  return h ? `${h}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
+}
+const firstLine = t => String(t || '').split(/[。\n.!?！？]/)[0].slice(0, 40);
+
+function buildChains(messages) {
+  const map = new Map();
+  for (const msg of messages) {
+    if (!map.has(msg.chain)) map.set(msg.chain, []);
+    map.get(msg.chain).push(msg);
+  }
+  return [...map.entries()].map(([id, list]) => {
+    list.sort((a, b) => a.sentAt - b.sentAt);
+    const first = list[0], last = list[list.length - 1];
+    return { id, list, first, last, state: last.state, pass: Math.max(...list.map(x => x.pass)),
+      title: first.title || firstLine(first.text) || first.id, updated: last.sentAt };
+  }).sort((a, b) => b.updated - a.updated);
+}
+
+/* ---------- state ---------- */
+const ui = { data: null, chains: [], filter: 'all', selected: null, live: false };
+
+function setData(data, live) {
+  ui.data = data; ui.live = live;
+  ui.chains = buildChains(data.messages || []);
+  if (!ui.selected && params.get('select')) ui.selected = params.get('select');
+  if (!ui.chains.some(c => c.id === ui.selected)) {
+    ui.selected = (ui.chains.find(c => ACTIVE.has(c.state) && c.state !== 'queued') || ui.chains[0] || {}).id || null;
+  }
+  render();
+}
+
+/* ---------- render ---------- */
+function render() {
+  const conn = $('#conn');
+  conn.classList.toggle('demo', !ui.live);
+  conn.lastElementChild.textContent = ui.live ? `已连接 · ${POLL_MS / 1000}s 刷新` : '示例数据';
+  renderAgents(); renderTabs(); renderTasks(); renderDetail();
+}
+
+function renderAgents() {
+  const sessions = ui.data.sessions || [];
+  $('#agents').innerHTML = sessions.map(s => {
+    const a = agent(s.client);
+    const mine = ui.chains.filter(c => c.last.toClient === s.client && ACTIVE.has(c.state)).length;
+    const lastTouch = ui.chains.find(c => c.list.some(m => m.fromClient === s.client || m.toClient === s.client));
+    const label = { idle: '空闲', running: '运行中', offline: '离线' }[s.state] || s.state;
+    const note = mine ? `待处理 ${mine} 项` : lastTouch ? `最近 · <span data-rel="${lastTouch.updated}">${rel(lastTouch.updated)}</span>` : '暂无记录';
+    return `<article class="agent ${esc(s.state)}">
+      <div class="agent-top">
+        ${av(s.client)}
+        <div class="agent-id"><b>${esc(a.name)}</b><span>${esc(s.model || s.title || s.id)}</span></div>
+        <span class="status ${esc(s.state)}"><i></i>${esc(label)}</span>
+      </div>
+      <div class="agent-meta"><span class="mono">${esc(s.workspace || '')}</span><span>${note}</span></div>
+      <div class="agent-bar"></div>
+    </article>`;
+  }).join('');
+}
+
+function renderTabs() {
+  $('#tabs').innerHTML = FILTERS.map(f => {
+    const n = ui.chains.filter(c => f.test(c.state)).length;
+    return `<button class="tab${ui.filter === f.key ? ' on' : ''}" data-f="${f.key}">${f.label}<em>${n}</em></button>`;
+  }).join('');
+}
+
+function mini(state) {
+  const s = st(state), active = ACTIVE.has(state) && !s.fail;
+  return `<span class="mini">${[0, 1, 2, 3].map(i => {
+    if (i < s.cur) return '<i class="d"></i>';
+    if (i === s.cur && s.fail) return '<i class="f"></i>';
+    if (i === s.cur && active) return '<i class="a"></i>';
+    return '<i></i>';
+  }).join('')}</span>`;
+}
+
+function visibleChains() {
+  const f = FILTERS.find(x => x.key === ui.filter);
+  return ui.chains.filter(c => f.test(c.state));
+}
+
+function renderTasks() {
+  const list = visibleChains();
+  if (!list.length) { $('#tasks').innerHTML = '<li class="empty">这里暂时没有任务</li>'; return; }
+  const limit = ui.data.passLimit || 10;
+  $('#tasks').innerHTML = list.map(c => {
+    const s = st(c.state);
+    return `<li class="task t-${s.tone}${c.id === ui.selected ? ' on' : ''}" data-id="${esc(c.id)}">
+      <div class="row">
+        <span class="route">${av(c.first.fromClient, 1)}${ICON.arrow}${av(c.first.toClient, 1)}</span>
+        <time data-rel="${c.updated}">${rel(c.updated)}</time>
+      </div>
+      <div class="task-title">${esc(c.title)}</div>
+      <div class="row">${mini(c.state)}<span class="state-label">${s.label}</span><span class="pass mono">${c.pass}/${limit}</span></div>
+    </li>`;
+  }).join('');
+}
+
+function renderDetail() {
+  const c = ui.chains.find(x => x.id === ui.selected);
+  if (!c) { $('#detail').innerHTML = '<div class="empty">选择左侧任务查看进度</div>'; return; }
+  const s = st(c.state), active = ACTIVE.has(c.state) && !s.fail;
+  const limit = ui.data.passLimit || 10;
+  const from = agent(c.first.fromClient), to = agent(c.first.toClient);
+
+  const sub = [
+    clock(c.first.sentAt, true),
+    s.cur >= 1 && !(s.fail && s.cur === 1) ? agent(c.last.toClient).name : (s.fail && s.cur === 1 ? s.label : ''),
+    c.state === 'started' ? `已运行 <span data-elapsed="${c.last.sentAt}">${elapsed(c.last.sentAt)}</span>` : c.state === 'taken' ? '等待开始' : (s.fail && s.cur === 2 ? s.label : ''),
+    s.cur >= 4 ? (c.list.length > 1 ? '已闭环' : s.label) : '',
+  ];
+  if (c.state === 'queued') sub[1] = '等待目标空闲';
+  const steps = STEPS.map((name, i) => {
+    let cls = 'pending', inner = '';
+    if (i < s.cur) { cls = 'done'; inner = ICON.check; }
+    else if (i === s.cur && s.fail) { cls = 'failed'; inner = ICON.x; }
+    else if (i === s.cur && active) cls = 'active';
+    let line = '';
+    if (i > 0 && i <= s.cur) line = (i === s.cur && s.fail) ? ' fail-line' : ' fill';
+    return `<div class="step ${cls}${line}"><span class="node">${inner}</span><b>${name}</b><small>${sub[i] || ''}</small></div>`;
+  }).join('');
+
+  const timeStat = active
+    ? `<label>${c.state === 'started' ? '已运行' : '已等待'}</label><strong data-elapsed="${c.last.sentAt}">${elapsed(c.last.sentAt)}</strong>`
+    : `<label>最后更新</label><strong>${clock(c.updated)}<span data-rel="${c.updated}">${rel(c.updated)}</span></strong>`;
+
+  const tl = c.list.map(m => {
+    const ms = st(m.state);
+    return `<li class="tl-item t-${ms.tone}">
+      ${av(m.fromClient, 1)}
+      <div class="tl-head"><b>${esc(agent(m.fromClient).name)}</b><span class="to">→ ${esc(agent(m.toClient).name)}</span><span class="pill">${ms.label}</span><time>${clock(m.sentAt, true)}</time></div>
+      <div class="tl-sub mono">${esc(m.id)} · 第 ${m.pass} 轮${m.replyTo ? ' · 回复 ' + esc(m.replyTo) : ''}</div>
+      ${m.text ? `<div class="tl-text">${esc(m.text)}</div>` : ''}
+      ${m.reason ? `<div class="tl-reason">${esc(m.reason)}</div>` : ''}
+      ${m.answer ? `<div class="tl-answer"><label>最终回答</label>${esc(m.answer)}</div>` : ''}
+    </li>`;
+  }).join('');
+
+  $('#detail').innerHTML = `<div class="d-wrap t-${s.tone}">
+    <div class="d-route">${av(c.first.fromClient, 1)}${esc(from.name)}${ICON.arrow}${av(c.first.toClient, 1)}${esc(to.name)}</div>
+    <h1 class="d-title">${esc(c.title)}</h1>
+    <div class="d-meta">
+      <span class="pill">${s.label}</span>
+      <button class="copy" data-copy="${esc(c.id)}">${ICON.copy}<code>${esc(c.id)}</code></button>
+      <span class="sep"></span><span>${clock(c.first.sentAt)} 发起</span>
+    </div>
+    <div class="stepper">${steps}</div>
+    <div class="stats">
+      <div class="stat"><label>链路轮次</label><strong>${c.pass}<span>/ ${limit}</span></strong>
+        <div class="ticks">${Array.from({ length: limit }, (_, i) => `<i${i < c.pass ? ' class="on"' : ''}></i>`).join('')}</div></div>
+      <div class="stat">${timeStat}</div>
+      <div class="stat"><label>消息</label><strong>${c.list.length}<span>条</span></strong></div>
+    </div>
+    <div class="sec-h">链路记录<span>按时间顺序</span></div>
+    <ol class="tl">${tl}</ol>
+  </div>`;
+}
+
+/* ---------- live ticking (no full re-render) ---------- */
+setInterval(() => {
+  document.querySelectorAll('[data-elapsed]').forEach(el => { el.textContent = elapsed(+el.dataset.elapsed); });
+  document.querySelectorAll('[data-rel]').forEach(el => { el.textContent = rel(+el.dataset.rel); });
+}, 1000);
+
+/* ---------- interactions ---------- */
+$('#tabs').addEventListener('click', e => {
+  const b = e.target.closest('[data-f]'); if (!b) return;
+  ui.filter = b.dataset.f;
+  const list = visibleChains();
+  if (!list.some(c => c.id === ui.selected) && list[0]) ui.selected = list[0].id;
+  renderTabs(); renderTasks(); renderDetail();
+});
+$('#tasks').addEventListener('click', e => {
+  const li = e.target.closest('[data-id]'); if (!li) return;
+  ui.selected = li.dataset.id; renderTasks(); renderDetail();
+});
+$('#detail').addEventListener('click', async e => {
+  const b = e.target.closest('[data-copy]'); if (!b) return;
+  try { await navigator.clipboard.writeText(b.dataset.copy); } catch {}
+  const code = b.querySelector('code'), old = code.textContent;
+  code.textContent = '已复制'; setTimeout(() => { code.textContent = old; }, 1200);
+});
+document.addEventListener('keydown', e => {
+  if (!['ArrowDown', 'ArrowUp'].includes(e.key)) return;
+  const list = visibleChains(); if (!list.length) return;
+  e.preventDefault();
+  const i = list.findIndex(c => c.id === ui.selected);
+  const n = Math.min(list.length - 1, Math.max(0, i + (e.key === 'ArrowDown' ? 1 : -1)));
+  ui.selected = list[n].id; renderTasks(); renderDetail();
+  document.querySelector('.task.on')?.scrollIntoView({ block: 'nearest' });
+});
+
+/* ---------- theme ---------- */
+const themeBtn = $('#theme');
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  themeBtn.innerHTML = t === 'dark' ? ICON.sun : ICON.moon;
+}
+const params = new URLSearchParams(location.search);
+applyTheme(params.get('theme') || localStorage.getItem('am-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+themeBtn.addEventListener('click', () => {
+  const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('am-theme', t); applyTheme(t);
+});
+
+/* ---------- data loading ---------- */
+async function load() {
+  try {
+    const r = await fetch(ENDPOINT, { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    setData(await r.json(), true);
+  } catch { if (!ui.data) setData(demo(), false); }
+}
+if (location.protocol.startsWith('http')) { load(); setInterval(load, POLL_MS); }
+else setData(demo(), false);
+</script>
+</body>
+</html>
