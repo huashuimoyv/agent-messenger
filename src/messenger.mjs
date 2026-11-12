@@ -251,6 +251,18 @@ export class Messenger {
           if (observed[field] !== undefined) patch[field] = observed[field];
         }
         if (observed.replyId && !record.replyId) patch.replyId = observed.replyId;
+
+        const hasCompletion = observed.state === 'done' || observed.state === 'replied' || observed.answer || observed.replyId || record.replyId;
+        const isOffline = session.reachable === false || session.ended || session.state === 'closed' || session.state === 'offline';
+        if (isOffline && !hasCompletion && !TERMINAL_STATES.has(record.state)) {
+          if (!TERMINAL_STATES.has(patch.state || record.state)) {
+            patch.state = 'expired';
+            patch.reason = observed.reason
+              ? `${observed.reason} (Target is offline; wait ended with delivery unconfirmed.)`
+              : 'Target session is offline or unreachable; wait ended with delivery unconfirmed.';
+          }
+        }
+
         record = this.journal.update(record.id, patch);
       } else if (!TERMINAL_STATES.has(record.state)) {
         // Target session is no longer discoverable or has ended

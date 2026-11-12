@@ -620,6 +620,12 @@ export class AntigravityAdapter {
 
   async read(session, message) {
     if (message.anchor?.correlationUnsafe) {
+      if (session.reachable === false) {
+        return {
+          state: 'expired',
+          reason: 'Antigravity session is offline; wait ended with delivery unconfirmed. An explicit reply_to remains available.',
+        };
+      }
       return {
         state: message.state || 'queued',
         reason: 'Antigravity queued this while a turn was active, so its ordinary answer cannot be linked safely. Ask for an explicit reply_to.',
@@ -627,6 +633,12 @@ export class AntigravityAdapter {
     }
     const file = message.anchor?.path || session._file;
     if (!file || !fs.existsSync(file)) {
+      if (session.reachable === false) {
+        return {
+          state: 'expired',
+          reason: 'The Antigravity session is offline and transcript is not available. Wait ended with delivery unconfirmed.',
+        };
+      }
       return { state: message.state || 'queued', reason: 'The Antigravity transcript is not available yet. An explicit reply_to remains available.' };
     }
     const offset = Number.isSafeInteger(message.anchor?.offset) ? message.anchor.offset : 0;
@@ -650,12 +662,27 @@ export class AntigravityAdapter {
     } catch {
       return { state: message.state || 'queued', reason: 'The Antigravity transcript could not be read. An explicit reply_to remains available.' };
     }
-    if (!matched) return { state: message.state || 'queued' };
+    if (!matched) {
+      if (session.reachable === false) {
+        return {
+          state: 'expired',
+          reason: 'Target session is offline; message was not processed before shutdown. Wait ended with delivery unconfirmed.',
+        };
+      }
+      return { state: message.state || 'queued' };
+    }
     if (ended) {
       return {
         state: 'done', answer, turn,
         ...(['ERROR', 'CANCELED'].includes(status) ? { reason: `Antigravity turn ended with status ${status}.` }
           : !answer ? { reason: 'The Antigravity turn ended without readable answer text.' } : {}),
+      };
+    }
+    if (session.reachable === false) {
+      return {
+        state: 'expired',
+        turn,
+        reason: 'Target session is offline; turn did not complete before shutdown. Wait ended with delivery unconfirmed.',
       };
     }
     return { state: 'started', turn };

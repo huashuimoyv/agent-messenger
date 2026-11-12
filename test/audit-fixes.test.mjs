@@ -6,8 +6,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Journal, canTransition } from '../src/journal.mjs';
+import { Messenger } from '../src/messenger.mjs';
 import { FileChannel } from '../src/channel-store.mjs';
 import { PiAdapter } from '../src/adapters/pi.mjs';
+import { AntigravityAdapter } from '../src/adapters/antigravity.mjs';
 import { startDashboardServer } from '../src/dashboard-server.mjs';
 import { configuration } from '../src/config.mjs';
 
@@ -371,4 +373,73 @@ test('Round 2 - 6. Dashboard does not downgrade terminal state and invalidates c
   const msg = data.messages.find(m => m.id === 'm-db-done-test');
   assert.ok(msg);
   assert.equal(msg.state, 'done', 'Dashboard must not downgrade database done state to queued');
+});
+
+test('Round 2 - 3b. Antigravity offline session with correlationUnsafe message resolves to expired', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-r2-3b-'));
+  let messenger = null;
+  t.after(() => {
+    try { messenger?.close(); } catch {}
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const convId = '22222222-3333-4444-5555-666666666666';
+  const brainDir = path.join(root, '.gemini', 'antigravity', 'brain', convId);
+  fs.mkdirSync(path.join(brainDir, '.system_generated', 'logs'), { recursive: true });
+  const transcript = path.join(brainDir, '.system_generated', 'logs', 'transcript.jsonl');
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: 'USER_INPUT',
+    step_index: 1,
+    content: 'Initial query',
+    created_at: new Date(Date.now() - 86400000).toISOString(),
+  }) + '\n');
+
+  const config = { home: root, data: path.join(root, 'data') };
+  const adapter = new AntigravityAdapter(config, {
+    discover: async () => [], // Simulate software completely closed
+    request: async () => { throw new Error('offline'); }
+  });
+
+  const session = await adapter.get(convId);
+  assert.ok(session);
+  assert.equal(session.reachable, false, 'Offline session must have reachable: false');
+
+  // Verify adapter.read directly marks correlationUnsafe as expired when offline
+  const readRes = await adapter.read(session, {
+    id: 'm-ag-unsafe',
+    state: 'queued',
+    anchor: { correlationUnsafe: true, path: transcript },
+  });
+  assert.equal(readRes.state, 'expired');
+  assert.match(readRes.reason, /offline/i);
+
+  // Verify Messenger.get marks it as expired in database
+  const callerAdapter = {
+    client: 'codex',
+    get: async id => ({ id: `codex:${id}`, rawId: id, client: 'codex' }),
+  };
+  messenger = new Messenger({ data: path.join(root, 'data'), passLimit: 10 }, [adapter, callerAdapter], {});
+
+  messenger.journal.reserve({
+    id: 'm-ag-unsafe',
+    requestKey: 'req:ag:unsafe',
+    fingerprint: 'fp',
+    fromId: 'codex:test',
+    toId: `antigravity:${convId}`,
+    fromClient: 'codex',
+    toClient: 'antigravity',
+    sentAt: Date.now() - 86400000, // 24 hours ago
+    chain: 'm-ag-unsafe',
+    pass: 1,
+    kind: 'send',
+    replyTo: null,
+    replyId: null,
+    state: 'queued',
+    reason: null,
+    anchor: { correlationUnsafe: true, path: transcript },
+  });
+
+  const getRes = await messenger.get({ id: 'm-ag-unsafe' }, { threadId: 'test' });
+  assert.equal(getRes.state, 'expired', 'Messenger.get must return expired for offline unconfirmed session');
+  assert.match(getRes.reason, /offline/i);
 });
