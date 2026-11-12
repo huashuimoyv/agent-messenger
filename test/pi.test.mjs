@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { PiAdapter } from '../src/adapters/pi.mjs';
+import { Messenger, envelope } from '../src/messenger.mjs';
 import { atomicJson } from '../src/io.mjs';
 
 function fixture(t) {
@@ -30,20 +31,31 @@ function fixture(t) {
   return { root, config, adapter, sessionId, sessionFile, folderName };
 }
 
-test('PiAdapter lists sessions and extracts title, cwd, and canonical ID', async t => {
+test('PiAdapter lists sessions and sets reachable null without heartbeat, true with heartbeat', async t => {
   const f = fixture(t);
-  const list = await f.adapter.list();
+  let list = await f.adapter.list();
   assert.equal(list.length, 1);
   assert.equal(list[0].id, `pi:${f.sessionId}`);
   assert.equal(list[0].rawId, f.sessionId);
   assert.equal(list[0].client, 'pi');
   assert.equal(list[0].project, 'E:\\Ameath');
   assert.equal(list[0].title, 'Initial user prompt for title');
-  assert.equal(list[0].reachable, true);
+  assert.equal(list[0].reachable, null);
   assert.equal(list[0].state, 'idle');
+
+  // Add heartbeat
+  atomicJson(path.join(f.config.piChannel, 'sessions', `${f.sessionId}.json`), {
+    at: Date.now(),
+    pid: process.pid,
+    state: 'running'
+  });
+
+  list = await f.adapter.list();
+  assert.equal(list[0].reachable, true);
+  assert.equal(list[0].state, 'running');
 });
 
-test('PiAdapter delivers prompt to channel queue and reads final answer', async t => {
+test('PiAdapter delivers prompt to channel queue and reads final answer via record object', async t => {
   const f = fixture(t);
   const session = await f.adapter.get(f.sessionId);
   assert.ok(session);
@@ -63,12 +75,14 @@ test('PiAdapter delivers prompt to channel queue and reads final answer', async 
   ];
   fs.appendFileSync(f.sessionFile, newTurn.map(r => JSON.stringify(r) + '\n').join(''), 'utf8');
 
-  const reply = await f.adapter.read(session, 'm-pi-test-01', anchor);
+  // Read with record object (matching messenger.mjs call pattern)
+  const record = { id: 'm-pi-test-01', state: 'queued', anchor };
+  const reply = await f.adapter.read(session, record);
   assert.equal(reply.state, 'done');
   assert.equal(reply.answer, 'Result is 42.');
 });
 
-test('PiAdapter recognizes explicit reply_to', async t => {
+test('PiAdapter recognizes explicit reply_to and envelope formats normalized tool name', async t => {
   const f = fixture(t);
   const session = await f.adapter.get(f.sessionId);
   const anchor = await f.adapter.capture(session);
@@ -79,9 +93,13 @@ test('PiAdapter recognizes explicit reply_to', async t => {
   ];
   fs.appendFileSync(f.sessionFile, replyTurn.map(r => JSON.stringify(r) + '\n').join(''), 'utf8');
 
-  const reply = await f.adapter.read(session, 'm-req-99', anchor);
+  const reply = await f.adapter.read(session, { id: 'm-req-99', anchor });
   assert.equal(reply.state, 'replied');
   assert.equal(reply.replyId, 'm-req-99');
+
+  // Verify envelope generates normalized tool name for Pi
+  const envText = envelope({ client: 'codex', title: 'test' }, 'pi', 'm-test-env', null, 'hello');
+  assert.ok(envText.includes('mcp__agent_messenger__send_message'));
 });
 
 test('PiAdapter starts a new session in project directory', async t => {

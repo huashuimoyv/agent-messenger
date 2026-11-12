@@ -90,7 +90,7 @@ export class PiAdapter {
         title: parsed.title,
         project: parsed.project,
         state: live ? (live.state || 'idle') : 'idle',
-        reachable: true,
+        reachable: live ? true : null,
         updatedAt: item.mtimeMs,
         _file: item.file
       });
@@ -150,7 +150,7 @@ export class PiAdapter {
       title: parsed.title,
       project: parsed.project,
       state: live ? (live.state || 'idle') : 'idle',
-      reachable: true,
+      reachable: live ? true : null,
       updatedAt: fs.statSync(file).mtimeMs,
       _file: file
     };
@@ -178,10 +178,19 @@ export class PiAdapter {
     return { state: 'queued' };
   }
 
-  async read(session, targetMessageId, anchor) {
+  async read(session, message, optionalAnchor) {
+    const targetMessageId = typeof message === 'string' ? message : message?.id;
+    const anchor = optionalAnchor || (typeof message === 'object' ? message?.anchor : null) || {};
     const file = session._file || this.findSessionFile(session.rawId);
+
+    // Check prompt receipt in channel
+    const receipt = readJson(path.join(this.channel, 'prompts', session.rawId, `${targetMessageId}.json`));
+    let state = receipt?.refused ? 'refused' : receipt?.expiredAt ? 'expired' : receipt?.startedAt ? 'started' : receipt?.takenAt ? 'taken' : (message?.state || 'queued');
+    if (receipt?.text && receipt.expiresAt <= Date.now()) state = 'expired';
+    if (state === 'refused') return { state, reason: receipt.refused };
+
     if (!file || !fs.existsSync(file)) {
-      return { state: 'queued', answer: null };
+      return { state, answer: null };
     }
 
     const startOffset = anchor?.offset || 0;
@@ -218,7 +227,7 @@ export class PiAdapter {
     if (finalAnswer !== null) {
       return { state: 'done', answer: finalAnswer };
     }
-    return { state: 'started', answer: null };
+    return { state: state === 'queued' ? 'queued' : 'started', answer: null };
   }
 
   async start(folder, text, id) {

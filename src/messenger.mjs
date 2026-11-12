@@ -26,7 +26,7 @@ export function callerIdentity(meta, env = process.env) {
 
 export function envelope(from, targetClient, id, replyTo, text) {
   const label = `[Agent Messenger · from ${from.client} · ${cleanTitle(from.title)} · ${id}${replyTo ? ` · re ${replyTo}` : ''}]`;
-  const tool = targetClient === 'codex' ? 'mcp__agent_messenger__send_message' : targetClient === 'antigravity' ? "agent-messenger's send_message tool" : targetClient === 'pi' ? 'mcp__agent-messenger__send_message' : 'mcp__agent-messenger__send_message';
+  const tool = targetClient === 'codex' ? 'mcp__agent_messenger__send_message' : targetClient === 'antigravity' ? "agent-messenger's send_message tool" : targetClient === 'pi' ? 'mcp__agent_messenger__send_message' : 'mcp__agent-messenger__send_message';
   const footer = replyTo
     ? `This answers ${replyTo}. Only if more is needed, use ${tool} with reply_to: ${id}.`
     : `Reply using ${tool} with reply_to: ${id}. If that tool is unavailable, answer here; the sender can read this turn's final answer. Do not forward this request to another tool named send_message.`;
@@ -58,11 +58,24 @@ export class Messenger {
   }
   piCaller(tool, args) {
     if (!this.config.piChannel) return null;
-    const dir = path.join(this.config.piChannel, 'calls', String(process.ppid));
-    const notes = entries(dir).filter(e => e.isFile() && e.name.endsWith('.json')).map(e => readJson(path.join(dir, e.name)))
-      .filter(v => v && Date.now() - v.at < 60000 && v.tool === tool && hash(v.arguments) === hash(args));
-    const ids = [...new Set(notes.map(v => v.sessionId))];
-    return ids.length === 1 ? { client: 'pi', rawId: ids[0], turnId: null } : null;
+    const dir = path.join(this.config.piChannel, 'sessions');
+    if (!fs.existsSync(dir)) return null;
+    const now = Date.now();
+    const active = [];
+    for (const entry of entries(dir).filter(e => e.isFile() && e.name.endsWith('.json'))) {
+      const data = readJson(path.join(dir, entry.name));
+      if (!data || data.ended || (now - (data.at || 0) >= 30000)) continue;
+      const rawId = path.basename(entry.name, '.json');
+      if (data.pid && data.pid === process.ppid) {
+        return { client: 'pi', rawId, turnId: null };
+      }
+      active.push({ rawId, at: data.at || 0 });
+    }
+    // If only one active Pi session exists on this machine, attribute to it as fallback
+    if (active.length === 1) {
+      return { client: 'pi', rawId: active[0].rawId, turnId: null };
+    }
+    return null;
   }
   async caller(meta, tool, args, required = true) {
     const identity = callerIdentity(meta, this.env) || this.deepseekCaller(tool, args) || this.piCaller(tool, args);

@@ -1,6 +1,6 @@
 // Agent Messenger Pi Extension
-// Injects incoming messages from other agents, reports session status, and tracks caller identity for MCP calls.
-import { mkdirSync, writeFileSync, renameSync, readdirSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
+// Injects incoming messages from other agents and reports session status.
+import { mkdirSync, writeFileSync, renameSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -14,8 +14,6 @@ export default function (pi) {
   let pollTimer;
   let currentSessionId;
   let currentSessionFile;
-  const queues = new Map();
-  const notes = new Set();
 
   const file = (...parts) => join(channel, ...parts);
   const writeJson = (target, value) => {
@@ -27,14 +25,14 @@ export default function (pi) {
     } catch {}
   };
 
-  function checkIn() {
+  function checkIn(state = 'idle') {
     if (!currentSessionId) return;
     writeJson(file('sessions', `${currentSessionId}.json`), {
       at: Date.now(),
       pid,
       sessionFile: currentSessionFile,
       channelVersion: 1,
-      state: 'idle'
+      state
     });
   }
 
@@ -56,16 +54,27 @@ export default function (pi) {
             continue;
           }
 
-          // Mark as taken
-          writeJson(targetPath, { ...content, takenAt: Date.now(), startedAt: Date.now() });
+          // If agent is currently busy, deliver as follow-up to prevent drop
+          const options = (typeof ctx?.isIdle === 'function' && !ctx.isIdle()) ? { deliverAs: 'followUp' } : undefined;
 
-          // Send message to Pi session
+          // Attempt to send message
           if (typeof pi.sendUserMessage === 'function') {
-            pi.sendUserMessage(content.text);
+            pi.sendUserMessage(content.text, options);
           } else if (typeof ctx?.ui?.sendUserMessage === 'function') {
-            ctx.ui.sendUserMessage(content.text);
+            ctx.ui.sendUserMessage(content.text, options);
+          } else {
+            continue;
           }
-        } catch {}
+
+          // Mark takenAt and startedAt only after successful submission
+          writeJson(targetPath, { ...content, takenAt: Date.now(), startedAt: Date.now() });
+        } catch (err) {
+          // Record error without marking takenAt to allow subsequent retry
+          try {
+            const raw = JSON.parse(readFileSync(targetPath, 'utf8'));
+            writeJson(targetPath, { ...raw, lastError: String(err?.message || err), errorAt: Date.now() });
+          } catch {}
+        }
       }
     } catch {}
   }
@@ -75,10 +84,10 @@ export default function (pi) {
     currentSessionFile = ctx.sessionManager?.getSessionFile?.();
     if (!currentSessionId) return;
 
-    checkIn();
+    checkIn('idle');
 
     if (!heartbeatTimer) {
-      heartbeatTimer = setInterval(checkIn, 5000);
+      heartbeatTimer = setInterval(() => checkIn(ctx.isIdle?.() === false ? 'running' : 'idle'), 5000);
       heartbeatTimer.unref();
     }
 
@@ -89,45 +98,11 @@ export default function (pi) {
   });
 
   pi.on('agent_start', () => {
-    if (currentSessionId) {
-      writeJson(file('sessions', `${currentSessionId}.json`), {
-        at: Date.now(),
-        pid,
-        sessionFile: currentSessionFile,
-        state: 'running'
-      });
-    }
+    checkIn('running');
   });
 
   pi.on('agent_settled', () => {
-    if (currentSessionId) {
-      checkIn();
-    }
-  });
-
-  pi.on('tools/execute', async (event, next) => {
-    let noteFile;
-    const toolName = event.name || event.toolName;
-    if (toolName && toolName.includes('agent-messenger') && currentSessionId) {
-      const toolShort = toolName.replace(/^.*?agent[-_]messenger__/, '');
-      noteFile = file('calls', String(pid), `${randomUUID()}.json`);
-      writeJson(noteFile, {
-        tool: toolShort,
-        arguments: event.arguments || {},
-        sessionId: currentSessionId,
-        at: Date.now()
-      });
-      notes.add(noteFile);
-    }
-
-    try {
-      return await next();
-    } finally {
-      if (noteFile) {
-        try { rmSync(noteFile, { force: true }); } catch {}
-        notes.delete(noteFile);
-      }
-    }
+    checkIn('idle');
   });
 
   pi.on('session_shutdown', () => {
@@ -135,9 +110,6 @@ export default function (pi) {
     if (pollTimer) clearInterval(pollTimer);
     if (currentSessionId) {
       writeJson(file('sessions', `${currentSessionId}.json`), { ended: Date.now() });
-    }
-    for (const note of notes) {
-      try { rmSync(note, { force: true }); } catch {}
     }
   });
 }
