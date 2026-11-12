@@ -12,6 +12,7 @@ import { PiAdapter } from '../src/adapters/pi.mjs';
 import { AntigravityAdapter } from '../src/adapters/antigravity.mjs';
 import { startDashboardServer } from '../src/dashboard-server.mjs';
 import { configuration } from '../src/config.mjs';
+import piExtension from '../plugins/pi/agent-messenger.ts';
 
 test('1. Malformed HTTP request with invalid Host returns 400 and does not crash process', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-fix-1-'));
@@ -558,4 +559,147 @@ test('Round 2 - 6b. Dashboard does not permanently cache expired and reads late 
   assert.equal(adapterReads, 2, 'Second poll must query adapter again instead of permanent expired cache');
   assert.equal(msg2.state, 'done', 'Dashboard must adopt late done state');
   assert.equal(msg2.answer, 'Late reliable answer from transcript', 'Dashboard must return late answer');
+});
+
+test('Round 2 - 3d. Pi extension consumes normal prompt and skips .expired/.cancel marker prompts without ReferenceError', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-r2-3d-'));
+  const piChannel = path.join(root, 'pi-channel');
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const prevHome = process.env.AGENT_MESSENGER_HOME;
+  const prevChannel = process.env.AGENT_MESSENGER_PI_CHANNEL;
+  process.env.AGENT_MESSENGER_HOME = root;
+  process.env.AGENT_MESSENGER_PI_CHANNEL = piChannel;
+  t.after(() => {
+    if (prevHome !== undefined) process.env.AGENT_MESSENGER_HOME = prevHome;
+    else delete process.env.AGENT_MESSENGER_HOME;
+    if (prevChannel !== undefined) process.env.AGENT_MESSENGER_PI_CHANNEL = prevChannel;
+    else delete process.env.AGENT_MESSENGER_PI_CHANNEL;
+  });
+
+  const submitted = [];
+  const handlers = {};
+  const mockPi = {
+    on: (event, fn) => { handlers[event] = fn; },
+    sendUserMessage: text => { submitted.push(text); },
+  };
+
+  piExtension(mockPi);
+  assert.ok(typeof handlers['session_start'] === 'function');
+  t.after(() => handlers['session_shutdown']?.());
+
+  const sessionId = 'test-session-pi-ext';
+  const promptsFolder = path.join(piChannel, 'prompts', sessionId);
+  fs.mkdirSync(promptsFolder, { recursive: true });
+
+  // Normal prompt
+  const normalFile = path.join(promptsFolder, 'm-normal.json');
+  fs.writeFileSync(normalFile, JSON.stringify({ id: 'm-normal', text: 'execute normal task', at: 1000 }));
+
+  // Expired prompt with .expired marker sidecar
+  const expiredFile = path.join(promptsFolder, 'm-exp.json');
+  fs.writeFileSync(expiredFile, JSON.stringify({ id: 'm-exp', text: 'execute expired task', at: 1001 }));
+  fs.writeFileSync(path.join(promptsFolder, 'm-exp.expired'), JSON.stringify({ at: Date.now() }));
+
+  // Cancelled prompt with .cancel marker sidecar
+  const cancelFile = path.join(promptsFolder, 'm-cancel.json');
+  fs.writeFileSync(cancelFile, JSON.stringify({ id: 'm-cancel', text: 'execute cancel task', at: 1002 }));
+  fs.writeFileSync(path.join(promptsFolder, 'm-cancel.cancel'), JSON.stringify({ at: Date.now() }));
+
+  // Trigger session start
+  handlers['session_start'](null, {
+    sessionManager: {
+      getSessionId: () => sessionId,
+      getSessionFile: () => path.join(root, 'session.jsonl'),
+    }
+  });
+
+  // Verify submitted messages
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0], 'execute normal task');
+
+  // Verify normal prompt file was marked takenAt and startedAt
+  const normalOnDisk = JSON.parse(fs.readFileSync(normalFile, 'utf8'));
+  assert.ok(normalOnDisk.takenAt);
+  assert.ok(normalOnDisk.startedAt);
+
+  // Verify expired & cancel prompt files were NOT claimed/executed
+  const expOnDisk = JSON.parse(fs.readFileSync(expiredFile, 'utf8'));
+  assert.equal(expOnDisk.takenAt, undefined);
+  const cancelOnDisk = JSON.parse(fs.readFileSync(cancelFile, 'utf8'));
+  assert.equal(cancelOnDisk.takenAt, undefined);
+});
+
+test('Round 2 - 3e. Claude hook intercepts prompts with .expired or .cancel marker sidecars', async t => {
+  const prevChannel = process.env.AGENT_MESSENGER_CLAUDE_CHANNEL;
+  const channelDir = 'C:/mock/claude';
+  process.env.AGENT_MESSENGER_CLAUDE_CHANNEL = channelDir;
+  t.after(() => {
+    if (prevChannel !== undefined) process.env.AGENT_MESSENGER_CLAUDE_CHANNEL = prevChannel;
+    else delete process.env.AGENT_MESSENGER_CLAUDE_CHANNEL;
+  });
+
+  const { register } = await import('../plugins/claude/generated/hooks/register.ts');
+  let sessionHook = null;
+  register((name, hook) => {
+    if (name === 'session.start') sessionHook = hook;
+  });
+  assert.ok(sessionHook);
+
+  const submitted = [];
+  const written = new Map();
+  const folder = `${channelDir}/prompts/test-claude-session`;
+  const disk = new Map([
+    [`${folder}/m-normal.json`, JSON.stringify({ id: 'm-normal', text: 'claude normal' })],
+    [`${folder}/m-exp.json`, JSON.stringify({ id: 'm-exp', text: 'claude exp' })],
+    [`${folder}/m-exp.expired`, JSON.stringify({ at: 1000 })],
+  ]);
+
+  let notifyDone;
+  const donePromise = new Promise(r => { notifyDone = r; });
+
+  const mockCtx = {
+    session: {
+      id: async () => 'test-claude-session',
+      version: async () => ({ version: '1.0' }),
+    },
+    clock: {
+      now: async () => 1234567,
+      every: (ms, cb) => cb(),
+    },
+    fs: {
+      exists: async p => p === folder || disk.has(p),
+      list: async () => [
+        { kind: 'file', name: 'm-normal.json' },
+        { kind: 'file', name: 'm-exp.json' },
+      ],
+      read: async p => disk.get(p),
+      write: async (p, content) => {
+        written.set(p, content);
+        disk.set(p, content);
+      },
+    },
+    prompt: {
+      submit: async opts => {
+        submitted.push(opts.text);
+        notifyDone();
+        return {};
+      },
+    },
+  };
+
+  await sessionHook(mockCtx, {}, async e => e);
+  await donePromise;
+
+  // Normal prompt submitted, expired prompt intercepted
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0], 'claude normal');
+
+  // Normal was marked takenAt
+  const normalWritten = JSON.parse(written.get(`${folder}/m-normal.json`));
+  assert.ok(normalWritten.takenAt);
+
+  // Expired prompt was acknowledged as cancelledAt
+  const expWritten = JSON.parse(written.get(`${folder}/m-exp.json`));
+  assert.ok(expWritten.cancelledAt);
 });

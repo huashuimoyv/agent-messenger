@@ -108,7 +108,8 @@ export class FileChannel {
   receipt(rawId, messageId, fallbackState = 'queued') {
     const file = path.join(this.root, 'prompts', rawId, `${messageId}.json`);
     const expiredMarker = file.replace(/\.json$/, '.expired');
-    const hasMarker = fs.existsSync(expiredMarker) || fs.existsSync(file + '.expired');
+    const cancelMarker = file.replace(/\.json$/, '.cancel');
+    const hasMarker = fs.existsSync(expiredMarker) || fs.existsSync(cancelMarker) || fs.existsSync(file + '.expired');
     let raw = readJson(file);
     const sessionFile = path.join(this.root, 'sessions', `${rawId}.json`);
     const sessionRaw = readJson(sessionFile);
@@ -133,6 +134,7 @@ export class FileChannel {
           state = 'expired';
           if (!hasMarker && fs.existsSync(file)) {
             try { fs.writeFileSync(expiredMarker, JSON.stringify({ at: Date.now() })); } catch {}
+            try { fs.writeFileSync(cancelMarker, JSON.stringify({ at: Date.now() })); } catch {}
           }
         }
       }

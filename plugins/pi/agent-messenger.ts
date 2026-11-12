@@ -1,5 +1,5 @@
 // Agent Messenger Pi Extension — thin event-driven transport shell.
-import { mkdirSync, writeFileSync, renameSync, readdirSync, readFileSync, rmSync, watch } from 'node:fs';
+import { mkdirSync, writeFileSync, renameSync, readdirSync, readFileSync, rmSync, watch, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -57,7 +57,7 @@ export default function (pi) {
         try {
           const prompt = JSON.parse(readFileSync(targetPath, 'utf8'));
           if (typeof prompt?.text !== 'string' || !SAFE_ID.test(prompt.id)) continue;
-          if (prompt.takenAt || prompt.refused || prompt.expiredAt || existsSync(targetPath.replace(/\.json$/, '.expired')) || existsSync(targetPath + '.expired')) continue;
+          if (prompt.takenAt || prompt.refused || prompt.expiredAt || existsSync(targetPath.replace(/\.json$/, '.expired')) || existsSync(targetPath + '.expired') || existsSync(targetPath.replace(/\.json$/, '.cancel')) || existsSync(targetPath + '.cancel')) continue;
           pending.push({ targetPath, prompt });
         } catch {}
       }
