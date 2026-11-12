@@ -19,11 +19,13 @@ def main():
     home = Path.home()
     codex = Path(os.environ.get('CODEX_HOME', home / '.codex')) / 'config.toml'
     antigravity = home / '.gemini' / 'config' / 'mcp_config.json'
+    pi_mcp = home / '.pi' / 'agent' / 'mcp.json'
     codex_text = codex.read_text(encoding='utf-8-sig')
     codex_parsed = tomllib.loads(codex_text)
     ag_parsed = json.loads(antigravity.read_text(encoding='utf-8-sig'))
+    pi_parsed = json.loads(pi_mcp.read_text(encoding='utf-8-sig')) if pi_mcp.is_file() else {'mcpServers': {}}
     entry = {'command': node, 'args': args}
-    for existing in (codex_parsed.get('mcp_servers', {}).get('agent-messenger'), ag_parsed.get('mcpServers', {}).get('agent-messenger')):
+    for existing in (codex_parsed.get('mcp_servers', {}).get('agent-messenger'), ag_parsed.get('mcpServers', {}).get('agent-messenger'), pi_parsed.get('mcpServers', {}).get('agent-messenger')):
         if existing and existing != entry:
             raise SystemExit('An existing agent-messenger entry has different or additional settings; it was preserved. Resolve this name conflict first.')
 
@@ -45,27 +47,35 @@ def main():
     ag_parsed.setdefault('mcpServers', {}).pop('agent-hud', None)
     ag_parsed['mcpServers']['agent-messenger'] = entry
     new_ag = json.dumps(ag_parsed, ensure_ascii=False, indent=2) + '\n'
+    pi_parsed.setdefault('mcpServers', {}).pop('agent-hud', None)
+    pi_parsed['mcpServers']['agent-messenger'] = entry
+    new_pi = json.dumps(pi_parsed, ensure_ascii=False, indent=2) + '\n'
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     backups = []
-    for target in (codex, antigravity):
-        backup = target.with_name(target.name + '.agent-messenger-' + stamp + '.bak')
-        shutil.copy2(target, backup)
-        backups.append(str(backup))
-    for target, text in ((codex, new_codex), (antigravity, new_ag)):
+    targets_with_text = [(codex, new_codex), (antigravity, new_ag), (pi_mcp, new_pi)]
+    for target, _ in targets_with_text:
+        if target.is_file():
+            backup = target.with_name(target.name + '.agent-messenger-' + stamp + '.bak')
+            shutil.copy2(target, backup)
+            backups.append(str(backup))
+    for target, text in targets_with_text:
+        target.parent.mkdir(parents=True, exist_ok=True)
         temp = target.with_name(target.name + '.agent-messenger.tmp')
         temp.write_text(text, encoding='utf-8', newline='')
         os.replace(temp, target)
     actual_codex = tomllib.loads(codex.read_text(encoding='utf-8'))
     actual_ag = json.loads(antigravity.read_text(encoding='utf-8'))
+    actual_pi = json.loads(pi_mcp.read_text(encoding='utf-8'))
     assert actual_codex['mcp_servers']['agent-messenger'] == entry
     assert actual_ag['mcpServers']['agent-messenger'] == entry
+    assert actual_pi['mcpServers']['agent-messenger'] == entry
     old_other = {k: v for k, v in codex_parsed.items() if k != 'mcp_servers'}
     new_other = {k: v for k, v in actual_codex.items() if k != 'mcp_servers'}
     assert old_other == new_other
     for name, value in codex_parsed.get('mcp_servers', {}).items():
         if name not in ('agent-hud', 'agent-messenger'):
             assert actual_codex['mcp_servers'][name] == value
-    print(json.dumps({'configured': [str(codex), str(antigravity)], 'backups': backups, 'server': entry}, ensure_ascii=False, indent=2))
+    print(json.dumps({'configured': [str(codex), str(antigravity), str(pi_mcp)], 'backups': backups, 'server': entry}, ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

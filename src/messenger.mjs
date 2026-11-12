@@ -4,7 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Journal } from './journal.mjs';
 import { canonical, rawId, DeliveryError, readJson, entries, envelopeMessageId } from './io.mjs';
 
-const clients = ['codex', 'antigravity', 'claude', 'deepseek'];
+const clients = ['codex', 'antigravity', 'claude', 'deepseek', 'pi'];
 const cleanTitle = title => String(title || '').replace(/[\r\n\[\]]/g, ' ').slice(0, 60).trim();
 const messageId = () => `m-${randomBytes(6).toString('hex')}`;
 const ordered = value => Array.isArray(value) ? value.map(ordered) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, ordered(value[k])])) : value;
@@ -17,6 +17,7 @@ export function callerIdentity(meta, env = process.env) {
   const cascade = meta?.['antigravity.google/conversation_id'];
   if (typeof cascade === 'string' && cascade) return { client: 'antigravity', rawId: rawId('antigravity', cascade), turnId: null };
   if (env.CLAUDE_CODE_SESSION_ID) return { client: 'claude', rawId: env.CLAUDE_CODE_SESSION_ID, turnId: null };
+  if (env.PI_SESSION_ID) return { client: 'pi', rawId: rawId('pi', env.PI_SESSION_ID), turnId: null };
   // Explicit launch binding is useful for clients which do not send metadata.
   if (clients.includes(env.AGENT_MESSENGER_CLIENT) && env.AGENT_MESSENGER_SESSION_ID)
     return { client: env.AGENT_MESSENGER_CLIENT, rawId: rawId(env.AGENT_MESSENGER_CLIENT, env.AGENT_MESSENGER_SESSION_ID), turnId: null };
@@ -25,7 +26,7 @@ export function callerIdentity(meta, env = process.env) {
 
 export function envelope(from, targetClient, id, replyTo, text) {
   const label = `[Agent Messenger · from ${from.client} · ${cleanTitle(from.title)} · ${id}${replyTo ? ` · re ${replyTo}` : ''}]`;
-  const tool = targetClient === 'codex' ? 'mcp__agent_messenger__send_message' : targetClient === 'antigravity' ? "agent-messenger's send_message tool" : 'mcp__agent-messenger__send_message';
+  const tool = targetClient === 'codex' ? 'mcp__agent_messenger__send_message' : targetClient === 'antigravity' ? "agent-messenger's send_message tool" : targetClient === 'pi' ? 'mcp__agent-messenger__send_message' : 'mcp__agent-messenger__send_message';
   const footer = replyTo
     ? `This answers ${replyTo}. Only if more is needed, use ${tool} with reply_to: ${id}.`
     : `Reply using ${tool} with reply_to: ${id}. If that tool is unavailable, answer here; the sender can read this turn's final answer. Do not forward this request to another tool named send_message.`;
@@ -55,8 +56,16 @@ export class Messenger {
     const ids = [...new Set(notes.map(v => v.sessionId))];
     return ids.length === 1 ? { client: 'deepseek', rawId: ids[0], turnId: null } : null;
   }
+  piCaller(tool, args) {
+    if (!this.config.piChannel) return null;
+    const dir = path.join(this.config.piChannel, 'calls', String(process.ppid));
+    const notes = entries(dir).filter(e => e.isFile() && e.name.endsWith('.json')).map(e => readJson(path.join(dir, e.name)))
+      .filter(v => v && Date.now() - v.at < 60000 && v.tool === tool && hash(v.arguments) === hash(args));
+    const ids = [...new Set(notes.map(v => v.sessionId))];
+    return ids.length === 1 ? { client: 'pi', rawId: ids[0], turnId: null } : null;
+  }
   async caller(meta, tool, args, required = true) {
-    const identity = callerIdentity(meta, this.env) || this.deepseekCaller(tool, args);
+    const identity = callerIdentity(meta, this.env) || this.deepseekCaller(tool, args) || this.piCaller(tool, args);
     if (!identity) {
       if (!required) return null;
       throw new DeliveryError('The client did not identify this session. Use client MCP metadata or bind AGENT_MESSENGER_CLIENT and AGENT_MESSENGER_SESSION_ID at launch.');
@@ -82,7 +91,7 @@ export class Messenger {
       state: s.state || 'unknown', idle: s.state === 'idle' ? true : s.state === 'running' ? false : null,
       reachable: s.reachable ?? null, self: s.id === caller?.id,
     }));
-    return { sessions, next_offset: all.length > offset + limit ? offset + limit : null, start_clients: ['codex'], ...(warnings.length ? { warnings } : {}) };
+    return { sessions, next_offset: all.length > offset + limit ? offset + limit : null, start_clients: ['codex', 'pi'], ...(warnings.length ? { warnings } : {}) };
   }
   async nextPass(caller, reply) {
     const received = this.journal.received(caller.id);
@@ -159,7 +168,7 @@ export class Messenger {
   }
   async start(args, meta) {
     const from = await this.caller(meta, 'start_session', args);
-    if (args.client !== 'codex') throw new DeliveryError('This version starts Codex sessions only. Use send_message for an existing session of the other clients.');
+    if (!['codex', 'pi'].includes(args.client)) throw new DeliveryError('This version starts Codex and Pi sessions only. Use send_message for an existing session of the other clients.');
     const folder = args.folder || from.project;
     if (!folder || !path.isAbsolute(folder) || !fs.statSync(folder).isDirectory()) throw new DeliveryError('folder must be an existing absolute project directory.');
     const requestKey = `${from.id}:start:${args.request_id || messageId()}`;
@@ -172,12 +181,12 @@ export class Messenger {
     const chain = await this.nextPass(from, null);
     if (chain.pass > this.config.passLimit) throw new DeliveryError(`The chain reached ${this.config.passLimit} passes. A new user prompt is required.`);
     const id = messageId();
-    const reservation = this.journal.reserve({ id, requestKey, fingerprint, fromId: from.id, toId: `codex:pending-${id}`,
-      fromClient: from.client, toClient: 'codex', sentAt: Date.now(), chain: chain.chain || id, pass: chain.pass,
+    const reservation = this.journal.reserve({ id, requestKey, fingerprint, fromId: from.id, toId: `${args.client}:pending-${id}`,
+      fromClient: from.client, toClient: args.client, sentAt: Date.now(), chain: chain.chain || id, pass: chain.pass,
       kind: 'start', replyTo: null, state: 'uncertain', reason: null, anchor: {} });
     if (!reservation.created) return { ...this.result(reservation.record), session_id: reservation.record.toId };
     try {
-      const session = await this.adapters.get('codex').start(folder, envelope(from, 'codex', id, null, args.text), id);
+      const session = await this.adapters.get(args.client).start(folder, envelope(from, args.client, id, null, args.text), id);
       const record = this.journal.update(id, { toId: session.id, anchor: session.anchor || { offset: 0 }, state: session.deliveryState || 'queued', reason: session.reason || null });
       return { ...this.result(record), session_id: session.id };
     } catch (error) {

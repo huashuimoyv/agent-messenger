@@ -19,7 +19,7 @@
 
 客户端自动提供调用会话身份。不要把另一个智能体协作工具中同名的 send_message 当作本服务工具。若客户端没有携带身份，应在其 MCP 启动环境中绑定 `AGENT_MESSENGER_CLIENT` 和 `AGENT_MESSENGER_SESSION_ID`，服务不会猜测“最新会话”。
 
-`start_session` 首版只支持 Codex，接受 `client:"codex"`、现有绝对项目路径 `folder`、首条消息 `text`。其余客户端可以向现有会话发送。
+`start_session` 支持 Codex 和 Pi，接受 `client:"codex" | "pi"`、现有绝对项目路径 `folder`、首条消息 `text`。其余客户端可以向现有会话发送。
 
 Codex 的 legacy 和 paginated 历史都可读取。新建线程使用已实测的 legacy 历史格式；不会修改用户的全局历史格式设置。
 
@@ -33,8 +33,13 @@ python E:\Ameath\agent-messenger\scripts\install.py
 
 - `C:\Users\Ameath\.codex\config.toml`
 - `C:\Users\Ameath\.gemini\config\mcp_config.json`
+- `C:\Users\Ameath\.pi\agent\mcp.json`
 
-写入前在原目录生成带时间戳的 `.agent-messenger-*.bak` 完整备份，只将原 `agent-hud` MCP 入口替换为 `agent-messenger`，保留其他服务器和配置。恢复时把对应备份复制回原路径，再重新加载客户端。备份可能含有原配置的私密内容，应留在本机。
+写入前在原目录生成带时间戳的 `.agent-messenger-*.bak` 完整备份，保留其他服务器和配置。恢复时把对应备份复制回原路径，再重新加载客户端。备份可能含有原配置的私密内容，应留在本机。
+
+## Pi (pi-coding-agent) 扩展支持
+
+Pi 自动从 `~/.pi/agent/extensions/agent-messenger.ts` 加载扩展插件，实现会话心跳报到、排队消息自动消费、以及 MCP 调用者身份感知。会话历史自动从 `~/.pi/agent/sessions/` 的原生 JSONL 解析。可通过 `start_session` 直接拉起新的 Pi 实例。
 
 ## Claude Code / DeepSeek Harness
 
