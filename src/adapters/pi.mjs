@@ -196,6 +196,7 @@ export class PiAdapter {
 
     if (explicitReplyId) return { state: 'replied', answer: finalAnswer, replyId: explicitReplyId };
     if (finalAnswer !== null) return { state: 'done', answer: finalAnswer };
+    if (['refused', 'expired'].includes(state) && !matchedTurn) return { state, reason, answer: null };
     return { state: matchedTurn ? 'started' : (state === 'queued' ? 'queued' : 'started'), answer: null };
   }
 

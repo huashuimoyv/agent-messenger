@@ -55,10 +55,13 @@ const handle = serveStdio(() => {
   return server;
 }, { onerror: error => process.stderr.write(`agent-messenger: ${error.message}\n`) });
 
+let shuttingDown = false;
 async function shutdown() {
-  dashboard?.close();
-  await handle.close();
-  messenger.close();
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try { dashboard?.close(); } catch {}
+  try { await handle.close(); } catch {}
+  try { messenger.close(); } catch {}
 }
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);

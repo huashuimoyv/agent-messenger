@@ -323,16 +323,8 @@ function buildChains(messages) {
   return [...map.entries()].map(([id, list]) => {
     list.sort((a, b) => a.sentAt - b.sentAt);
     const first = list[0], last = list[list.length - 1];
-    let chainState = last.state;
-    if (list.some(m => m.state === 'replied' || m.replyId)) {
-      chainState = 'replied';
-    } else if (list.some(m => m.state === 'done')) {
-      chainState = 'done';
-    } else if (list.some(m => m.state === 'refused')) {
-      chainState = 'refused';
-    } else if (list.some(m => m.state === 'expired')) {
-      chainState = 'expired';
-    }
+    const active = [...list].reverse().find(m => ['queued', 'taken', 'started', 'uncertain'].includes(m.state));
+    const chainState = active ? active.state : (last.replyId ? 'replied' : last.state);
     return { id, list, first, last, state: chainState, pass: Math.max(...list.map(x => x.pass)),
       title: first.title || firstLine(first.text) || first.id, updated: last.sentAt };
   }).sort((a, b) => b.updated - a.updated);

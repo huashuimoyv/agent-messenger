@@ -8,7 +8,7 @@ const adapters = createAdapters(config);
 const port = Number(process.env.PORT) || 3721;
 const host = process.env.HOST || '127.0.0.1';
 
-const instance = startDashboardServer({ config, adapters, port, host });
+const instance = startDashboardServer({ config, adapters, port, host, unref: false });
 if (instance) {
   const url = `http://${host}:${port}`;
   console.log(`[Agent Messenger Dashboard] Running at ${url}`);

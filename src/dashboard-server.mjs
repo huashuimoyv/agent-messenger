@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { jsonLines, textContent } from './io.mjs';
+import { canTransition } from './journal.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -38,9 +39,9 @@ function findUiIndex() {
 }
 
 async function resolveMessageDetails(record, adapterMap) {
-  const cacheKey = record.id;
+  const cacheKey = `${record.id}:${record.state}:${record.replyId || ''}`;
   const cached = messageDetailsCache.get(cacheKey);
-  if (cached && (record.state === 'done' || record.state === 'refused' || record.state === 'replied' || record.state === 'expired')) {
+  if (cached) {
     return cached;
   }
 
@@ -102,7 +103,13 @@ async function resolveMessageDetails(record, adapterMap) {
     // Ignore extraction errors gracefully
   }
 
-  const effectiveState = record.replyId ? 'replied' : (readRes?.state || record.state);
+  let effectiveState = record.state;
+  if (readRes?.state && canTransition(record.state, readRes.state)) {
+    effectiveState = readRes.state;
+  }
+  if (record.replyId || readRes?.replyId) {
+    effectiveState = 'replied';
+  }
 
   const result = {
     text: text || `[${record.kind}] ${record.fromClient} -> ${record.toClient}`,
@@ -112,14 +119,14 @@ async function resolveMessageDetails(record, adapterMap) {
     reason
   };
 
-  if (effectiveState === 'done' || effectiveState === 'refused' || effectiveState === 'replied' || effectiveState === 'expired') {
+  if (['done', 'replied', 'refused', 'expired'].includes(effectiveState) && record.state === effectiveState) {
     messageDetailsCache.set(cacheKey, result);
   }
 
   return result;
 }
 
-export function startDashboardServer({ config, adapters, port = 3721, host = '127.0.0.1' }) {
+export function startDashboardServer({ config, adapters, port = 3721, host = '127.0.0.1', unref = true } = {}) {
   if (process.env.AGENT_MESSENGER_DASHBOARD === '0') return null;
 
   const targetPort = Number(process.env.AGENT_MESSENGER_PORT) || port;
@@ -304,12 +311,15 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
 
   try {
     server.listen(targetPort, host, () => {
-      server.unref();
+      if (unref) {
+        server.unref();
+      }
     });
   } catch {}
 
   return {
     server,
+    unref,
     close: () => new Promise(r => {
       for (const s of sockets) {
         try { s.destroy(); } catch {}

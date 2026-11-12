@@ -121,6 +121,9 @@ export class FileChannel {
     if (raw?.text && !raw.takenAt && !raw.startedAt) {
       if (raw.expiresAt <= Date.now() || sessionRaw?.ended) {
         state = 'expired';
+        if (!raw.expiredAt && fs.existsSync(file)) {
+          try { atomicJson(file, { ...raw, expiredAt: Date.now() }); } catch {}
+        }
       }
     }
     return { state, reason: state === 'refused' ? String(raw.refused) : (state === 'expired' && sessionRaw?.ended ? 'Target session ended before prompt was processed' : null), raw };
