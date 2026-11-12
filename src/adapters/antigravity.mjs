@@ -3,16 +3,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { canonical, rawId, entries, jsonLines, textContent, envelopeMessageId, DeliveryError } from '../io.mjs';
+import { canonical, rawId, entries, jsonLines, headRecords, tailOffset, textContent, envelopeMessageId, DeliveryError } from '../io.mjs';
 
+const execFileAsync = promisify(execFile);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SERVICE_PATH = '/exa.language_server_pb.LanguageServerService/';
 const META = { metadata: { ideName: 'antigravity', extensionName: 'antigravity', locale: 'en', ideVersion: 'unknown' } };
 const ENQUEUE = 'MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE';
 const STALE_MS = 120_000;
+const ENDPOINT_TTL_MS = 45_000;
+const LARGE_TRANSCRIPT_BYTES = 512 * 1024;
+const TAIL_READ_BYTES = 256 * 1024;
 const MAX_RESPONSE = 32 * 1024 * 1024;
+
+const httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 15_000, maxSockets: 8 });
+const httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 15_000, maxSockets: 8, rejectUnauthorized: false });
+httpAgent.on('free', socket => socket.unref?.());
+httpsAgent.on('free', socket => socket.unref?.());
 
 class RpcError extends Error {
   constructor(message, status = null) { super(message); this.status = status; }
@@ -23,7 +33,7 @@ function commandFlag(command, name) {
   return match?.[1]?.replace(/^["']|["']$/g, '') || null;
 }
 
-function windowsServers() {
+async function windowsServers() {
   const script = [
     "$ErrorActionPreference = 'SilentlyContinue'",
     "function Flag([string]$s, [string]$n) {",
@@ -32,31 +42,37 @@ function windowsServers() {
     "  if (-not $m.Success) { return $null }",
     "  return $m.Groups[1].Value.Trim('\"').Trim(\"'\")",
     "}",
+    "$procs = @(Get-CimInstance Win32_Process -Filter 'Name=''language_server.exe''')",
+    "if ($procs.Count -eq 0) { '[]'; exit 0 }",
+    "$listeners = @{}",
+    "foreach ($conn in (Get-NetTCPConnection -State Listen)) {",
+    "  if ($conn.LocalAddress -in @('127.0.0.1','::1','0.0.0.0','::')) {",
+    "    $owner = [int]$conn.OwningProcess",
+    "    if (-not $listeners.ContainsKey($owner)) { $listeners[$owner] = [System.Collections.Generic.HashSet[int]]::new() }",
+    "    [void]$listeners[$owner].Add([int]$conn.LocalPort)",
+    "  }",
+    "}",
     "$rows = [System.Collections.Generic.List[object]]::new()",
-    "$procs = Get-CimInstance Win32_Process -Filter 'Name=''language_server.exe'''",
     "foreach ($p in $procs) {",
     "  $exe = ([string]$p.ExecutablePath).ToLowerInvariant().Replace('\\','/')",
-    "  $appData = Flag $p.CommandLine 'app_data_dir'",
+    "  $appData = [string](Flag $p.CommandLine 'app_data_dir')",
     "  if (-not ($exe.Contains('/antigravity/') -or $exe.Contains('/antigravity ide.app/') -or $exe.Contains('/antigravity-cli/') -or $exe.Contains('/antigravity_cli/') -or $appData.StartsWith('antigravity',[System.StringComparison]::OrdinalIgnoreCase))) { continue }",
     "  $token = Flag $p.CommandLine 'csrf_token'",
     "  $extensionPort = Flag $p.CommandLine 'extension_server_port'",
     "  $extensionToken = Flag $p.CommandLine 'extension_server_csrf_token'",
     "  if (-not $token -and -not ($extensionPort -and $extensionToken)) { continue }",
-    "  $ports = @(Get-NetTCPConnection -State Listen -OwningProcess $p.ProcessId | Where-Object { $_.LocalAddress -in @('127.0.0.1','::1','0.0.0.0','::') } | Select-Object -ExpandProperty LocalPort -Unique)",
-    "  [void]$rows.Add([pscustomobject]@{ pid=[int]$p.ProcessId; token=$token; ports=$ports; extensionPort=$extensionPort; extensionToken=$extensionToken })",
+    "  $pidInt = [int]$p.ProcessId",
+    "  $ports = if ($listeners.ContainsKey($pidInt)) { @($listeners[$pidInt]) } else { @() }",
+    "  [void]$rows.Add([pscustomobject]@{ pid=$pidInt; token=$token; ports=$ports; extensionPort=$extensionPort; extensionToken=$extensionToken })",
     "}",
     "ConvertTo-Json -InputObject @($rows.ToArray()) -Depth 4 -Compress",
   ].join('\n');
-  let output;
+
   try {
-    output = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
       encoding: 'utf8', timeout: 5_000, maxBuffer: 1024 * 1024, windowsHide: true,
     });
-  } catch {
-    return [];
-  }
-  try {
-    const rows = JSON.parse(output.trim() || '[]');
+    const rows = JSON.parse(stdout.trim() || '[]');
     return (Array.isArray(rows) ? rows : [rows]).map(row => ({
       pid: Number(row.pid),
       token: typeof row.token === 'string' ? row.token : '',
@@ -69,15 +85,15 @@ function windowsServers() {
   }
 }
 
-function unixServers() {
-  let output;
+async function unixServers() {
+  let stdout;
   try {
-    output = execFileSync('ps', ['-eww', '-o', 'pid=,command='], { encoding: 'utf8', timeout: 2_000, maxBuffer: 8 * 1024 * 1024 });
+    ({ stdout } = await execFileAsync('ps', ['-eww', '-o', 'pid=,command='], { encoding: 'utf8', timeout: 2_000, maxBuffer: 8 * 1024 * 1024 }));
   } catch {
     return [];
   }
-  const rows = [];
-  for (const line of output.split(/\r?\n/)) {
+  const matched = [];
+  for (const line of stdout.split(/\r?\n/)) {
     const match = line.match(/^\s*(\d+)\s+(.+)$/);
     if (!match) continue;
     const command = match[2];
@@ -90,14 +106,18 @@ function unixServers() {
     const token = commandFlag(command, 'csrf_token') || '';
     const extensionPort = Number(commandFlag(command, 'extension_server_port')) || null;
     const extensionToken = commandFlag(command, 'extension_server_csrf_token') || '';
+    if (token || (extensionPort && extensionToken)) {
+      matched.push({ pidStr: match[1], pid: Number(match[1]), token, extensionPort, extensionToken });
+    }
+  }
+  return Promise.all(matched.map(async item => {
     let ports = [];
     try {
-      const listeners = execFileSync('lsof', ['-nP', '-a', '-p', match[1], '-iTCP', '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 2_000, maxBuffer: 1024 * 1024 });
+      const { stdout: listeners } = await execFileAsync('lsof', ['-nP', '-a', '-p', item.pidStr, '-iTCP', '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 2_000, maxBuffer: 1024 * 1024 });
       ports = [...new Set([...listeners.matchAll(/:(\d+)\s+\(LISTEN\)/g)].map(value => Number(value[1])))];
     } catch {}
-    if (token || (extensionPort && extensionToken)) rows.push({ pid: Number(match[1]), token, ports, extensionPort, extensionToken });
-  }
-  return rows;
+    return { pid: item.pid, token: item.token, ports, extensionPort: item.extensionPort, extensionToken: item.extensionToken };
+  }));
 }
 
 function candidatesFor(servers) {
@@ -109,14 +129,15 @@ function candidatesFor(servers) {
     }
   }
   const unique = new Map();
-  for (const endpoint of found) unique.set(endpoint.scheme + ':' + endpoint.port + ':' + endpoint.pid, endpoint);
+  for (const endpoint of found) unique.set(`${endpoint.scheme}:${endpoint.port}:${endpoint.pid}`, endpoint);
   return [...unique.values()];
 }
 
 function requestJson(endpoint, method, params, timeout = 3_000) {
   return new Promise((resolve, reject) => {
-    const transport = endpoint.scheme === 'https' ? https : http;
-    const agent = endpoint.scheme === 'https' ? new https.Agent({ rejectUnauthorized: false }) : undefined;
+    const isHttps = endpoint.scheme === 'https';
+    const transport = isHttps ? https : http;
+    const agent = isHttps ? httpsAgent : httpAgent;
     const body = Buffer.from(JSON.stringify(params));
     const request = transport.request({
       hostname: '127.0.0.1',
@@ -143,7 +164,6 @@ function requestJson(endpoint, method, params, timeout = 3_000) {
       });
       response.on('error', error => reject(new RpcError('Antigravity local service response failed: ' + error.message, response.statusCode || null)));
       response.on('end', () => {
-        if (agent) agent.destroy();
         const text = Buffer.concat(chunks).toString('utf8');
         let value;
         try { value = text ? JSON.parse(text) : null; }
@@ -157,26 +177,20 @@ function requestJson(endpoint, method, params, timeout = 3_000) {
       });
     });
     request.setTimeout(timeout, () => request.destroy(new Error('Antigravity local service timed out.')));
-    request.on('error', error => {
-      if (agent) agent.destroy();
-      reject(new RpcError('Antigravity local service request failed: ' + error.message));
-    });
+    request.on('error', error => reject(new RpcError('Antigravity local service request failed: ' + error.message)));
     request.end(body);
   });
 }
 
 async function discoverEndpoints() {
-  const servers = process.platform === 'win32' ? windowsServers() : unixServers();
-  const endpoints = [];
-  for (const endpoint of candidatesFor(servers)) {
-    try {
-      const status = await requestJson(endpoint, 'GetUserStatus', {
-        metadata: { ideName: 'antigravity', extensionName: 'antigravity', locale: 'en', ideVersion: 'unknown' },
-      });
-      if (status.userStatus && typeof status.userStatus === 'object') endpoints.push(endpoint);
-    } catch {}
-  }
-  return endpoints;
+  const servers = process.platform === 'win32' ? await windowsServers() : await unixServers();
+  const candidates = candidatesFor(servers);
+  if (!candidates.length) return [];
+  const results = await Promise.allSettled(candidates.map(async endpoint => {
+    const status = await requestJson(endpoint, 'GetUserStatus', META, 1_500);
+    return status.userStatus && typeof status.userStatus === 'object' ? endpoint : null;
+  }));
+  return results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
 }
 
 function profileRoots(config) {
@@ -186,7 +200,8 @@ function profileRoots(config) {
 
 function transcriptPath(root, id) {
   const file = path.join(root, 'brain', id, '.system_generated', 'logs', 'transcript.jsonl');
-  return fs.existsSync(file) && fs.statSync(file).isFile() ? file : null;
+  try { return fs.statSync(file).isFile() ? file : null; }
+  catch { return null; }
 }
 
 function conversationFiles(roots) {
@@ -198,19 +213,22 @@ function conversationFiles(roots) {
       const file = transcriptPath(root, entry.name);
       const old = result.get(entry.name);
       const folder = path.join(brain, entry.name);
-      const mtimeMs = fs.statSync(folder).mtimeMs;
-      if (file && (!old?.file || fs.statSync(file).mtimeMs > old.mtimeMs)) {
-        result.set(entry.name, { file, mtimeMs: fs.statSync(file).mtimeMs });
-      } else if (!old) {
-        result.set(entry.name, { file: null, mtimeMs });
-      }
+      try {
+        if (file) {
+          const fileMtime = fs.statSync(file).mtimeMs;
+          if (!old?.file || fileMtime > old.mtimeMs) result.set(entry.name, { file, mtimeMs: fileMtime });
+        } else if (!old) {
+          result.set(entry.name, { file: null, mtimeMs: fs.statSync(folder).mtimeMs });
+        }
+      } catch {}
     }
     const conversations = path.join(root, 'conversations');
     for (const entry of entries(conversations)) {
       if (!entry.isFile() || !entry.name.endsWith('.db')) continue;
       const id = entry.name.slice(0, -3);
       if (UUID.test(id) && !result.has(id)) {
-        result.set(id, { file: null, mtimeMs: fs.statSync(path.join(conversations, entry.name)).mtimeMs });
+        try { result.set(id, { file: null, mtimeMs: fs.statSync(path.join(conversations, entry.name)).mtimeMs }); }
+        catch {}
       }
     }
   }
@@ -310,88 +328,63 @@ function summaryState(summary) {
   return 'unknown';
 }
 
-async function readTranscript(file) {
-  if (!file) return { offset: 0, title: null, updatedAt: null, state: 'unknown', current: null, lastStep: null };
-  let offset = 0, title = null, updatedAt = null, state = 'unknown', current = null, lastStep = null;
-  let active = false, latestFinal = false;
-  for await (const { value, offset: nextOffset } of jsonLines(file)) {
-    offset = nextOffset;
-    const at = timestamp(value.created_at) ?? timestamp(value.timestamp);
-    if (at !== null) updatedAt = at;
-    const stepIndex = value.step_index ?? value.stepIndex;
-    if (stepIndex !== undefined && stepIndex !== null) lastStep = String(stepIndex);
-    if (value.type === 'USER_INPUT' && value.source !== 'SYSTEM') {
-      const prompt = promptText(value);
-      if (!title && prompt) title = prompt.replace(/\s+/g, ' ').slice(0, 120);
-      current = prompt ? { text: prompt, turnId: stepIndex == null ? null : 'step-' + stepIndex } : current;
-      state = 'running';
-      active = true;
-      latestFinal = false;
-    } else if (value.type === 'PLANNER_RESPONSE') {
-      const status = String(value.status || '').toUpperCase();
-      const hasToolCalls = Array.isArray(value.tool_calls) && value.tool_calls.length > 0;
-      if (hasToolCalls && !['ERROR', 'CANCELED'].includes(status)) {
-        state = 'running';
-        active = true;
-        latestFinal = false;
-      } else if (['DONE', 'ERROR', 'CANCELED'].includes(status)) {
-        state = 'idle';
-        active = false;
-        latestFinal = true;
-      } else if (active) {
-        state = 'running';
-      } else {
-        state = 'unknown';
-      }
-    } else if (value.type === 'GENERIC' || value.type === 'TOOL_RESPONSE') {
-      if (active) state = 'running';
-      latestFinal = false;
+function applyTranscriptRecord(acc, value) {
+  const at = timestamp(value.created_at) ?? timestamp(value.timestamp);
+  if (at !== null) acc.updatedAt = at;
+  const stepIndex = value.step_index ?? value.stepIndex;
+  if (stepIndex !== undefined && stepIndex !== null) acc.lastStep = String(stepIndex);
+  if (value.type === 'USER_INPUT' && value.source !== 'SYSTEM') {
+    const prompt = promptText(value);
+    if (!acc.title && prompt) acc.title = prompt.replace(/\s+/g, ' ').slice(0, 120);
+    if (prompt) acc.current = { text: prompt, turnId: stepIndex == null ? null : 'step-' + stepIndex };
+    acc.state = 'running';
+    acc.active = true;
+    acc.latestFinal = false;
+  } else if (value.type === 'PLANNER_RESPONSE') {
+    const status = String(value.status || '').toUpperCase();
+    const hasToolCalls = Array.isArray(value.tool_calls) && value.tool_calls.length > 0;
+    if (hasToolCalls && !['ERROR', 'CANCELED'].includes(status)) {
+      acc.state = 'running';
+      acc.active = true;
+      acc.latestFinal = false;
+    } else if (['DONE', 'ERROR', 'CANCELED'].includes(status)) {
+      acc.state = 'idle';
+      acc.active = false;
+      acc.latestFinal = true;
+    } else if (acc.active) {
+      acc.state = 'running';
+    } else {
+      acc.state = 'unknown';
     }
+  } else if (value.type === 'GENERIC' || value.type === 'TOOL_RESPONSE') {
+    if (acc.active) acc.state = 'running';
+    acc.latestFinal = false;
   }
-  const stat = fs.statSync(file);
-  updatedAt ??= stat.mtimeMs;
-  if (active && !latestFinal) state = Date.now() - updatedAt < STALE_MS ? 'running' : 'unknown';
-  else if (state === 'unknown' && offset > 0) state = 'idle';
-  return { offset, title, updatedAt, state, current, lastStep };
-}
-
-async function sessionRecord(id, local, summary, endpointCount) {
-  const info = await readTranscript(local?.file || null);
-  const updatedAt = info.updatedAt ?? summaryTimestamp(summary) ?? local?.mtimeMs ?? null;
-  return {
-    id: canonical('antigravity', id), rawId: id, client: 'antigravity',
-    title: summaryTitle(summary) || info.title || id,
-    project: summaryProject(summary),
-    state: info.state !== 'unknown' ? info.state : summaryState(summary),
-    reachable: summary ? true : endpointCount ? null : false,
-    ...(endpointCount ? {} : { reason: 'No authenticated Antigravity language server is running.' }),
-    updatedAt, _file: local?.file || null, _offset: info.offset, _lastStep: info.lastStep,
-    _current: info.current, _summary: summary || null,
-  };
 }
 
 function endpointKey(endpoint) {
-  return endpoint.pid + ':' + endpoint.scheme + ':' + endpoint.port;
+  return `${endpoint.pid}:${endpoint.scheme}:${endpoint.port}`;
 }
 
 async function findOwner(id, endpoints, request) {
-  const loaded = [];
-  const other = [];
-  for (const endpoint of endpoints) {
-    try {
-      const response = await request(endpoint, 'GetAllCascadeTrajectories', {});
-      const summary = response.trajectorySummaries?.[id];
-      if (summary) loaded.push({ endpoint, summary });
-      else other.push(endpoint);
-    } catch {
-      other.push(endpoint);
-    }
-  }
+  const checks = await Promise.allSettled(endpoints.map(async endpoint => {
+    const response = await request(endpoint, 'GetAllCascadeTrajectories', {});
+    return { endpoint, summary: response.trajectorySummaries?.[id] || null };
+  }));
+  const loaded = [], other = [];
+  checks.forEach((res, idx) => {
+    if (res.status === 'fulfilled' && res.value.summary) loaded.push(res.value);
+    else other.push(endpoints[idx]);
+  });
   for (const candidate of [...loaded.map(item => item.endpoint), ...other]) {
     try {
       const trajectory = await request(candidate, 'GetCascadeTrajectory', { cascadeId: id });
       if (trajectory?.trajectory && typeof trajectory.trajectory === 'object') {
-        return { endpoint: candidate, trajectory, summary: loaded.find(item => endpointKey(item.endpoint) === endpointKey(candidate))?.summary || null };
+        return {
+          endpoint: candidate,
+          trajectory,
+          summary: loaded.find(item => endpointKey(item.endpoint) === endpointKey(candidate))?.summary || null,
+        };
       }
     } catch {}
   }
@@ -399,51 +392,176 @@ async function findOwner(id, endpoints, request) {
 }
 
 export class AntigravityAdapter {
+  #transcriptCache = new Map();
+  #cachedEndpoints = null;
+  #endpointsExpireAt = 0;
+  #discovering = null;
+  #rawDiscover;
+
   constructor(config, dependencies = {}) {
     this.config = config;
     this.client = 'antigravity';
-    this.discover = dependencies.discover || discoverEndpoints;
+    this.replyTool = "agent-messenger's send_message tool";
+    this.canStart = false;
+    this.#rawDiscover = dependencies.discover || discoverEndpoints;
+    this.discover = () => this.#discoverCached();
     this.request = dependencies.request || requestJson;
     this.roots = profileRoots(config);
   }
 
-  async snapshot() {
-    const endpoints = await this.discover();
-    const summaries = new Map();
-    for (const endpoint of endpoints) {
+  identifyCaller({ meta }) {
+    const cascade = meta?.['antigravity.google/conversation_id'];
+    return typeof cascade === 'string' && cascade ? { client: 'antigravity', rawId: rawId('antigravity', cascade), turnId: null } : null;
+  }
+
+  watchPaths(session, record) {
+    return [record?.anchor?.path || session?._file].filter(Boolean);
+  }
+
+  invalidateEndpoints() {
+    this.#cachedEndpoints = null;
+    this.#endpointsExpireAt = 0;
+  }
+
+  async #discoverCached(force = false) {
+    if (!force && this.#cachedEndpoints && Date.now() < this.#endpointsExpireAt) {
+      return this.#cachedEndpoints;
+    }
+    if (this.#discovering) return this.#discovering;
+    this.#discovering = (async () => {
       try {
-        const response = await this.request(endpoint, 'GetAllCascadeTrajectories', {});
-        for (const [id, summary] of Object.entries(response.trajectorySummaries || {})) {
+        const found = await this.#rawDiscover();
+        this.#cachedEndpoints = found;
+        this.#endpointsExpireAt = Date.now() + (found.length ? ENDPOINT_TTL_MS : 5_000);
+        return found;
+      } finally {
+        this.#discovering = null;
+      }
+    })();
+    return this.#discovering;
+  }
+
+  async #readTranscript(file) {
+    if (!file) return { offset: 0, title: null, updatedAt: null, state: 'unknown', current: null, lastStep: null };
+    let stat;
+    try { stat = fs.statSync(file); }
+    catch { return { offset: 0, title: null, updatedAt: null, state: 'unknown', current: null, lastStep: null }; }
+
+    const cached = this.#transcriptCache.get(file);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      const data = { ...cached.data };
+      if (data.active && !data.latestFinal) {
+        data.state = Date.now() - data.updatedAt < STALE_MS ? 'running' : 'unknown';
+      }
+      return data;
+    }
+
+    const acc = { offset: 0, title: null, updatedAt: null, state: 'unknown', current: null, lastStep: null, active: false, latestFinal: false };
+    let start = 0;
+    if (stat.size > LARGE_TRANSCRIPT_BYTES) {
+      const head = await headRecords(file, 64 * 1024, 15);
+      for (const rec of head) {
+        if (rec.type === 'USER_INPUT' && rec.source !== 'SYSTEM') {
+          const prompt = promptText(rec);
+          if (prompt) { acc.title = prompt.replace(/\s+/g, ' ').slice(0, 120); break; }
+        }
+      }
+      start = await tailOffset(file, TAIL_READ_BYTES);
+    }
+
+    for await (const { value, offset: nextOffset } of jsonLines(file, start)) {
+      acc.offset = nextOffset;
+      applyTranscriptRecord(acc, value);
+    }
+    if (start > 0 && acc.offset === 0) {
+      for await (const { value, offset: nextOffset } of jsonLines(file, 0)) {
+        acc.offset = nextOffset;
+        applyTranscriptRecord(acc, value);
+      }
+    }
+
+    acc.updatedAt ??= stat.mtimeMs;
+    if (acc.active && !acc.latestFinal) acc.state = Date.now() - acc.updatedAt < STALE_MS ? 'running' : 'unknown';
+    else if (acc.state === 'unknown' && acc.offset > 0) acc.state = 'idle';
+
+    this.#transcriptCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, data: { ...acc } });
+    return acc;
+  }
+
+  async #sessionRecord(id, local, summary, endpointCount) {
+    const info = await this.#readTranscript(local?.file || null);
+    const updatedAt = info.updatedAt ?? summaryTimestamp(summary) ?? local?.mtimeMs ?? null;
+    return {
+      id: canonical('antigravity', id), rawId: id, client: 'antigravity',
+      title: summaryTitle(summary) || info.title || id,
+      project: summaryProject(summary),
+      state: info.state !== 'unknown' ? info.state : summaryState(summary),
+      reachable: summary ? true : endpointCount ? null : false,
+      ...(endpointCount ? {} : { reason: 'No authenticated Antigravity language server is running.' }),
+      updatedAt, _file: local?.file || null, _offset: info.offset, _lastStep: info.lastStep,
+      _current: info.current, _summary: summary || null,
+    };
+  }
+
+  async #collectSummaries(endpoints) {
+    const summaries = new Map();
+    const responses = await Promise.allSettled(endpoints.map(ep => this.request(ep, 'GetAllCascadeTrajectories', {})));
+    let anyFailed = false;
+    for (const res of responses) {
+      if (res.status === 'fulfilled') {
+        for (const [id, summary] of Object.entries(res.value.trajectorySummaries || {})) {
           if (UUID.test(id)) summaries.set(id, summary);
         }
-      } catch {}
+      } else {
+        anyFailed = true;
+      }
     }
-    const local = conversationFiles(this.roots);
-    const ids = new Set([...local.keys(), ...summaries.keys()]);
-    const sessions = [];
-    for (const id of ids) sessions.push(await sessionRecord(id, local.get(id), summaries.get(id), endpoints.length));
-    sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    return sessions;
+    return { summaries, anyFailed };
   }
 
   async list({ limit = 50, offset = 0 } = {}) {
-    return (await this.snapshot()).slice(offset, offset + limit);
+    let endpoints = await this.discover();
+    let { summaries, anyFailed } = await this.#collectSummaries(endpoints);
+    if (anyFailed && !summaries.size && this.#cachedEndpoints) {
+      endpoints = await this.#discoverCached(true);
+      ({ summaries } = await this.#collectSummaries(endpoints));
+    }
+
+    const local = conversationFiles(this.roots);
+    const candidates = [];
+    for (const id of new Set([...local.keys(), ...summaries.keys()])) {
+      const loc = local.get(id), sum = summaries.get(id);
+      candidates.push({ id, loc, sum, coarseTime: summaryTimestamp(sum) ?? loc?.mtimeMs ?? 0 });
+    }
+    candidates.sort((a, b) => b.coarseTime - a.coarseTime);
+
+    const windowSize = Math.min(candidates.length, offset + limit + 8);
+    const sessions = await Promise.all(
+      candidates.slice(0, windowSize).map(c => this.#sessionRecord(c.id, c.loc, c.sum, endpoints.length))
+    );
+    sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    return sessions.slice(offset, offset + limit);
   }
 
   async get(id) {
     const raw = rawId('antigravity', id);
     if (!UUID.test(raw)) return null;
     const local = conversationFiles(this.roots).get(raw);
-    const endpoints = await this.discover();
-    let summary = null;
-    for (const endpoint of endpoints) {
-      try {
-        const response = await this.request(endpoint, 'GetAllCascadeTrajectories', {});
-        if (response.trajectorySummaries?.[raw]) { summary = response.trajectorySummaries[raw]; break; }
-      } catch {}
+    let endpoints = await this.discover();
+    const lookup = async eps => {
+      const checks = await Promise.allSettled(eps.map(ep => this.request(ep, 'GetAllCascadeTrajectories', {})));
+      for (const r of checks) {
+        if (r.status === 'fulfilled' && r.value.trajectorySummaries?.[raw]) return r.value.trajectorySummaries[raw];
+      }
+      return null;
+    };
+    let summary = await lookup(endpoints);
+    if (!summary && this.#cachedEndpoints && !local) {
+      endpoints = await this.#discoverCached(true);
+      summary = await lookup(endpoints);
     }
     if (!local && !summary) return null;
-    return sessionRecord(raw, local, summary, endpoints.length);
+    return this.#sessionRecord(raw, local, summary, endpoints.length);
   }
 
   async capture(session) {
@@ -458,16 +576,23 @@ export class AntigravityAdapter {
   async deliver(session, text, messageId) {
     const id = rawId('antigravity', session.rawId || session.id);
     if (!UUID.test(id)) throw new DeliveryError('Antigravity session identity is invalid.');
-    const endpoints = await this.discover();
+    let endpoints = await this.discover();
+    if (!endpoints.length && this.#cachedEndpoints !== null) {
+      endpoints = await this.#discoverCached(true);
+    }
     if (!endpoints.length) throw new DeliveryError('No authenticated Antigravity language server is running.');
-    const owner = await findOwner(id, endpoints, this.request);
+
+    let owner = await findOwner(id, endpoints, this.request);
+    if (!owner && this.#cachedEndpoints) {
+      endpoints = await this.#discoverCached(true);
+      if (endpoints.length) owner = await findOwner(id, endpoints, this.request);
+    }
     if (!owner) throw new DeliveryError('The Antigravity cascade could not be opened on a running language server.');
+
     let config = cascadeConfig(owner.trajectory);
     if (!config) {
       try {
-        const status = await this.request(owner.endpoint, 'GetUserStatus', {
-          metadata: { ideName: 'antigravity', extensionName: 'antigravity', locale: 'en', ideVersion: 'unknown' },
-        });
+        const status = await this.request(owner.endpoint, 'GetUserStatus', META);
         config = defaultCascadeConfig(status);
       } catch {}
     }
@@ -476,12 +601,13 @@ export class AntigravityAdapter {
       cascadeId: id,
       items: [{ text }],
       deliveryStrategy: ENQUEUE,
+      ...(config ? { cascadeConfig: config } : {}),
     };
-    if (config) params.cascadeConfig = config;
     try {
       await this.request(owner.endpoint, 'SendUserCascadeMessage', params);
       return { state: 'queued' };
     } catch (error) {
+      this.invalidateEndpoints();
       if (error instanceof RpcError && error.status >= 400 && error.status < 500) {
         return { state: 'refused', reason: error.message };
       }
@@ -525,9 +651,13 @@ export class AntigravityAdapter {
       return { state: message.state || 'queued', reason: 'The Antigravity transcript could not be read. An explicit reply_to remains available.' };
     }
     if (!matched) return { state: message.state || 'queued' };
-    if (ended) return { state: 'done', answer, turn,
-      ...(['ERROR', 'CANCELED'].includes(status) ? { reason: `Antigravity turn ended with status ${status}.` }
-        : !answer ? { reason: 'The Antigravity turn ended without readable answer text.' } : {}) };
+    if (ended) {
+      return {
+        state: 'done', answer, turn,
+        ...(['ERROR', 'CANCELED'].includes(status) ? { reason: `Antigravity turn ended with status ${status}.` }
+          : !answer ? { reason: 'The Antigravity turn ended without readable answer text.' } : {}),
+      };
+    }
     return { state: 'started', turn };
   }
 

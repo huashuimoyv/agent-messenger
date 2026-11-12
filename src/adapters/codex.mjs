@@ -3,10 +3,8 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { StringDecoder } from 'node:string_decoder';
 import { DatabaseSync } from 'node:sqlite';
-import { Decompress } from 'fzstd';
-import { canonical, rawId, jsonLines, textContent, envelopeMessageId, DeliveryError } from '../io.mjs';
+import { canonical, rawId, readRecords, tailOffset, textContent, envelopeMessageId, DeliveryError } from '../io.mjs';
 import { historyState, captureHistory, currentHistory, readHistory } from './codex-history.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -46,39 +44,11 @@ function findExecutable(config) {
   return null;
 }
 
-async function* zstdRecords(file, start = 0) {
-  const decoder = new StringDecoder('utf8');
-  let pending = '', byteOffset = 0, ready = [];
-  const stream = new Decompress(chunk => {
-    pending += decoder.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
-    let newline;
-    while ((newline = pending.indexOf('\n')) !== -1) {
-      const line = pending.slice(0, newline);
-      pending = pending.slice(newline + 1);
-      byteOffset += Buffer.byteLength(line) + 1;
-      if (byteOffset > start && line.trim()) ready.push({ value: JSON.parse(line), offset: byteOffset });
-    }
-  });
-  for await (const chunk of fs.createReadStream(file, { highWaterMark: 16 * 1024 })) {
-    stream.push(chunk);
-    yield* ready;
-    ready = [];
-  }
-}
-
-async function* records(file, start = 0) {
-  if (file.endsWith('.zst')) {
-    yield* zstdRecords(file, start);
-    return;
-  }
-  yield* jsonLines(file, start);
-}
-
 async function safeEndOffset(file) {
   if (!file || !fs.existsSync(file)) return 0;
   if (file.endsWith('.zst')) {
     let end = 0;
-    for await (const row of records(file)) end = row.offset;
+    for await (const row of readRecords(file)) end = row.offset;
     return end;
   }
   const handle = await fsp.open(file, 'r');
@@ -97,46 +67,26 @@ async function safeEndOffset(file) {
   } finally { await handle.close(); }
 }
 
-async function tailStart(file) {
-  const handle = await fsp.open(file, 'r');
-  try {
-    const size = (await handle.stat()).size;
-    let position = Math.max(0, size - TAIL_BYTES);
-    if (position === 0) return 0;
-    while (position < size) {
-      const length = Math.min(16 * 1024, size - position);
-      const buffer = Buffer.allocUnsafe(length);
-      await handle.read(buffer, 0, length, position);
-      const newline = buffer.indexOf(0x0a);
-      if (newline !== -1) return position + newline + 1;
-      position += length;
-    }
-    return size;
-  } finally { await handle.close(); }
-}
-
 function eventType(value) {
   return value?.type === 'event_msg' ? value.payload?.type : null;
 }
 
-function stateFromLifecycle(file) {
-  return (async () => {
-    if (!file || file.endsWith('.zst') || !fs.existsSync(file)) return 'unknown';
-    const start = await tailStart(file);
-    let active = null, sawTerminal = false;
-    for await (const { value } of records(file, start)) {
-      const type = eventType(value), payload = value.payload || {};
-      if (type === 'task_started') active = payload.turn_id || true;
-      if (type === 'task_complete' || type === 'turn_aborted') {
-        const id = payload.turn_id;
-        if (!active || active === true || !id || id === active) {
-          active = null;
-          sawTerminal = true;
-        }
+async function stateFromLifecycle(file) {
+  if (!file || file.endsWith('.zst') || !fs.existsSync(file)) return 'unknown';
+  const start = await tailOffset(file, TAIL_BYTES);
+  let active = null, sawTerminal = false;
+  for await (const { value } of readRecords(file, start)) {
+    const type = eventType(value), payload = value.payload || {};
+    if (type === 'task_started') active = payload.turn_id || true;
+    if (type === 'task_complete' || type === 'turn_aborted') {
+      const id = payload.turn_id;
+      if (!active || active === true || !id || id === active) {
+        active = null;
+        sawTerminal = true;
       }
     }
-    return active ? 'running' : sawTerminal ? 'idle' : 'unknown';
-  })();
+  }
+  return active ? 'running' : sawTerminal ? 'idle' : 'unknown';
 }
 
 function userPrompt(value) {
@@ -284,8 +234,24 @@ export class CodexAdapter {
   constructor(config) {
     this.config = config;
     this.client = 'codex';
+    this.replyTool = 'mcp__agent_messenger__send_message';
+    this.canStart = true;
     this.executable = findExecutable(config);
     this.launch = config.spawn || spawn;
+  }
+
+  identifyCaller({ meta }) {
+    const turn = meta?.['x-codex-turn-metadata'];
+    const thread = meta?.threadId || turn?.thread_id;
+    return typeof thread === 'string' && thread ? { client: 'codex', rawId: rawId('codex', thread), turnId: turn?.turn_id || null } : null;
+  }
+
+  watchPaths(session) {
+    return [
+      session?.file,
+      path.join(this.config.codexHome, 'state_5.sqlite-wal'),
+      path.join(this.config.codexHome, 'thread_history_1.sqlite-wal'),
+    ].filter(Boolean);
   }
 
   #session(row) {
@@ -309,13 +275,13 @@ export class CodexAdapter {
        FROM threads WHERE archived=0 AND agent_role IS NULL AND agent_nickname IS NULL
          AND (NOT json_valid(source) OR json_type(source, '$.subagent') IS NULL)
        ORDER BY updated_at_ms DESC, updated_at DESC LIMIT ? OFFSET ?`, [limit, offset]);
-    const sessions = [];
-    for (const row of rows) {
+    return Promise.all(rows.map(async row => {
       const session = this.#session(row);
-      session.state = session.historyMode === 'paginated' ? historyState(this.config.codexHome, session.rawId) : await stateFromLifecycle(session.file);
-      sessions.push(session);
-    }
-    return sessions;
+      session.state = session.historyMode === 'paginated'
+        ? historyState(this.config.codexHome, session.rawId)
+        : await stateFromLifecycle(session.file);
+      return session;
+    }));
   }
 
   async get(id) {
@@ -327,7 +293,9 @@ export class CodexAdapter {
          AND (NOT json_valid(source) OR json_type(source, '$.subagent') IS NULL) LIMIT 1`, [raw]);
     if (!row) return null;
     const session = this.#session(row);
-    session.state = session.historyMode === 'paginated' ? historyState(this.config.codexHome, session.rawId) : await stateFromLifecycle(session.file);
+    session.state = session.historyMode === 'paginated'
+      ? historyState(this.config.codexHome, session.rawId)
+      : await stateFromLifecycle(session.file);
     return session;
   }
 
@@ -359,7 +327,7 @@ export class CodexAdapter {
     if (!file || !fs.existsSync(file)) return {};
     const start = file === anchor.path ? Number(anchor.offset || 0) : 0;
     let activeTurn = null, matchedTurn = null, finalText = '';
-    for await (const { value } of records(file, start)) {
+    for await (const { value } of readRecords(file, start)) {
       const type = eventType(value), payload = value.payload || {};
       if (type === 'task_started') activeTurn = payload.turn_id || null;
       const prompt = userPrompt(value);
@@ -384,8 +352,9 @@ export class CodexAdapter {
     if (session.historyMode === 'paginated') return currentHistory(this.config.codexHome, session.rawId, turnId);
     const file = session.file;
     if (!file || !fs.existsSync(file)) return null;
+    const start = turnId ? 0 : await tailOffset(file, TAIL_BYTES);
     let activeTurn = null, latest = null, selected = null;
-    for await (const { value } of records(file)) {
+    for await (const { value } of readRecords(file, start)) {
       const type = eventType(value), payload = value.payload || {};
       if (type === 'task_started') activeTurn = payload.turn_id || null;
       const prompt = userPrompt(value);
@@ -394,6 +363,14 @@ export class CodexAdapter {
         const row = { text: prompt, turnId: id };
         latest = row;
         if (turnId && id === turnId) selected = row;
+      }
+    }
+    if (!latest && start > 0) {
+      for await (const { value } of readRecords(file, 0)) {
+        const type = eventType(value), payload = value.payload || {};
+        if (type === 'task_started') activeTurn = payload.turn_id || null;
+        const prompt = userPrompt(value);
+        if (prompt) latest = { text: prompt, turnId: activeTurn || payload.turn_id || null };
       }
     }
     return turnId ? selected : latest;
@@ -414,8 +391,6 @@ export class CodexAdapter {
         file: rolloutPath(this.config.codexHome, started.thread.rolloutPath || started.thread.rollout_path),
       };
       try {
-        // Like the upstream desktop start route, name the thread to persist it
-        // before the creating app-server exits and another owner takes it.
         await request('thread/name/set', { threadId: raw, name: `Agent Messenger ${messageId}` }, true);
         session = await this.get(raw) || session;
         session.anchor = await this.capture(session);
@@ -434,16 +409,16 @@ export class CodexAdapter {
           clientUserMessageId: `agent-messenger:${messageId}`,
           input: [{ type: 'text', text, text_elements: [] }],
         }, true));
-        if (!queued.queuedSubmission || typeof queued.queuedSubmission !== 'object') {
-          result.deliveryState = 'uncertain';
-          result.reason = 'Codex did not confirm that it queued the first prompt.';
-        } else {
-          result.deliveryState = 'queued';
-        }
-      } catch (error) {
-        result.deliveryState = error.state || 'uncertain';
-        result.reason = error.message;
+      if (!queued.queuedSubmission || typeof result.queuedSubmission !== 'object' && !queued.queuedSubmission) {
+        result.deliveryState = 'uncertain';
+        result.reason = 'Codex did not confirm that it queued the first prompt.';
+      } else {
+        result.deliveryState = 'queued';
       }
+    } catch (error) {
+      result.deliveryState = error.state || 'uncertain';
+      result.reason = error.message;
+    }
     if (result.deliveryState === 'queued') {
       result.reason = await wakeDesktop(this.config, result.rawId, this.launch);
     }

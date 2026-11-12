@@ -12,12 +12,13 @@
 
 ## 使用
 
-1. 在 Codex 或 Antigravity 中重新加载 MCP 配置或新开会话。
-2. 让智能体调用 `agent-messenger` 的 `list_sessions`，选取目标 ID。
-3. 调用 `send_message`：`{"to":"<目标ID>","text":"要发送的内容","request_id":"task-001"}`。
-4. 用返回的消息 ID 调用 `get_message`，读取状态和最终回答。收件方可用 `{"reply_to":"<收到的消息ID>","text":"回复"}` 直接回信。
+1. 在客户端中重新加载 MCP 配置或新开会话。
+2. 调用 `send_message`：既可先通过 `list_sessions` 选取精确会话 ID，也可直接传语义简写（如 `"to":"antigravity"` 或 `"to":"codex:latest"`，优先匹配同项目在线空闲会话）。
+3. 支持单次调用内阻塞等待结果：在 `send_message` 或 `get_message` 中传入 `"wait_ms":15000`（上限 30000），服务端通过 `fs.watch` 事件驱动监听回执与日志变更，收件方完成回答或调用 `reply_to` 回信后毫秒级立即唤醒返回，免去轮询开销。
 
 客户端自动提供调用会话身份。不要把另一个智能体协作工具中同名的 send_message 当作本服务工具。若客户端没有携带身份，应在其 MCP 启动环境中绑定 `AGENT_MESSENGER_CLIENT` 和 `AGENT_MESSENGER_SESSION_ID`，服务不会猜测“最新会话”。
+
+新增客户端适配器只需实现自描述接口并在 `src/adapters/index.mjs` 注册，核心调度层 `src/messenger.mjs` 与协议层 `src/server.mjs` 无需改动。
 
 `start_session` 支持 Codex 和 Pi，接受 `client:"codex" | "pi"`、现有绝对项目路径 `folder`、首条消息 `text`。其余客户端可以向现有会话发送。
 

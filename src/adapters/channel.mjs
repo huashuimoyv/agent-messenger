@@ -1,31 +1,8 @@
-// File-channel protocol and transcript rules adapted from Agent HUD (Apache-2.0).
+// File-channel adapter for Claude Code and DeepSeek Harness, built on FileChannel.
 import fs from 'node:fs';
 import path from 'node:path';
-import { Decompress } from 'fzstd';
-import { StringDecoder } from 'node:string_decoder';
-import { canonical, rawId, validName, entries, readJson, atomicJson, jsonLines, textContent, DeliveryError, envelopeMessageId } from '../io.mjs';
-
-async function* records(file, offset = 0) {
-  if (!file.endsWith('.zstd')) { yield* jsonLines(file, offset); return; }
-  const decoder = new StringDecoder('utf8');
-  let pending = '', ready = [];
-  // Node 24.9's native Zstd decoder stops after the first concatenated frame.
-  // Harness appends one frame per write; use the small streaming decoder here.
-  const stream = new Decompress(chunk => {
-    pending += decoder.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
-    let at;
-    while ((at = pending.indexOf('\n')) !== -1) {
-      const line = pending.slice(0, at); pending = pending.slice(at + 1);
-      if (line.trim()) ready.push({ value: JSON.parse(line), offset: 0 });
-    }
-  });
-  for await (const chunk of fs.createReadStream(file, { highWaterMark: 16384 })) {
-    stream.push(chunk);
-    yield* ready; ready = [];
-  }
-  // A live log can end in an unfinished compression frame. Keep the decoder
-  // open at this snapshot boundary and rescan on the next read.
-}
+import { canonical, rawId, validName, entries, readJson, readRecords, textContent, DeliveryError, envelopeMessageId } from '../io.mjs';
+import { FileChannel } from '../channel-store.mjs';
 
 function claudePrompt(v) {
   const content = v.message?.content, text = textContent(content);
@@ -36,22 +13,33 @@ function claudePrompt(v) {
 }
 
 export class ChannelAdapter {
+  #logCache = new Map();
+
   constructor(config, client) {
-    this.config = config; this.client = client;
+    this.config = config;
+    this.client = client;
+    this.replyTool = 'mcp__agent-messenger__send_message';
+    this.canStart = false;
     this.channel = client === 'claude' ? config.claudeChannel : config.deepseekChannel;
-    const cutoff = Date.now() - 7 * 86400000;
-    for (const folder of entries(path.join(this.channel, 'prompts')).filter(e => e.isDirectory())) {
-      for (const entry of entries(path.join(this.channel, 'prompts', folder.name)).filter(e => e.isFile() && e.name.endsWith('.json'))) {
-        const file = path.join(this.channel, 'prompts', folder.name, entry.name);
-        if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file);
-      }
+    this.store = new FileChannel(this.channel);
+  }
+
+  identifyCaller({ env, ppid, tool, args, hash }) {
+    if (this.client === 'claude') {
+      return env.CLAUDE_CODE_SESSION_ID ? { client: 'claude', rawId: env.CLAUDE_CODE_SESSION_ID, turnId: null } : null;
     }
+    const id = this.store.callerByNote(ppid, tool, args, hash);
+    return id ? { client: 'deepseek', rawId: id, turnId: null } : null;
   }
+
   heartbeat(id) {
-    const file = path.join(this.channel, 'sessions', `${id}.json`);
-    const value = readJson(file);
-    return value && !value.ended && Date.now() - fs.statSync(file).mtimeMs < 20000 ? value : null;
+    return this.store.heartbeat(id);
   }
+
+  watchPaths(session, record) {
+    return [session?.file, ...this.store.watchTargets(session?.rawId, record?.id)].filter(Boolean);
+  }
+
   log(id) {
     if (this.client === 'claude') {
       for (const project of entries(path.join(this.config.claudeHome, 'projects')).filter(e => e.isDirectory())) {
@@ -68,14 +56,17 @@ export class ChannelAdapter {
     }
     return null;
   }
-  async get(id) {
-    id = rawId(this.client, id);
-    if (!validName(id)) return null;
-    const live = this.heartbeat(id), file = this.log(id);
-    if (!live && !file) return null;
-    let title = live?.title || id, project = live?.project || null, state = 'unknown', current = null, end = 0, seq = 0;
-    if (file) for await (const { value: v, offset } of records(file)) {
-      end = offset; seq = Math.max(seq, v.seq || 0);
+
+  async #scanLog(file, fallbackTitle, fallbackProject) {
+    const stat = fs.statSync(file);
+    const cached = this.#logCache.get(file);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return { ...cached.data, mtimeMs: stat.mtimeMs };
+    }
+    let title = fallbackTitle, project = fallbackProject, state = 'unknown', current = null, end = 0, seq = 0, subagent = false;
+    for await (const { value: v, offset } of readRecords(file)) {
+      end = offset;
+      seq = Math.max(seq, v.seq || 0);
       if (v.cwd) project = v.cwd;
       if (this.client === 'claude') {
         if (v.isSidechain) continue;
@@ -84,28 +75,51 @@ export class ChannelAdapter {
         if (v.message?.role === 'assistant' && ['end_turn', 'stop_sequence'].includes(v.message.stop_reason)) state = 'idle';
         if (v.type === 'system' && ['turn_duration', 'stop_hook_summary'].includes(v.subtype)) state = 'idle';
       } else {
-        if (v.type === 'session' && (v.origin === 'subagent' || v.delegationDepth > 0)) return null;
+        if (v.type === 'session' && (v.origin === 'subagent' || v.delegationDepth > 0)) { subagent = true; break; }
         if (v.type === 'session/title') title = v.data.title;
         if (v.type === 'turn/start') state = 'running';
         if (v.type === 'turn/end') state = 'idle';
-        if (v.type === 'user/message' && v.data?.source?.kind === 'user') current = { text: textContent(v.data.content), turnId: String(v.data.turn ?? '') };
+        if (v.type === 'user/message' && v.data?.source?.kind === 'user') {
+          current = { text: textContent(v.data.content), turnId: String(v.data.turn ?? '') };
+        }
       }
     }
-    return { id: canonical(this.client, id), rawId: id, client: this.client, title, project, state,
-      reachable: Boolean(live), reason: live ? null : 'The standalone messenger plugin has not checked in within 20 seconds.',
-      updatedAt: file ? fs.statSync(file).mtimeMs : live.at, file, _end: end, _seq: seq, _current: current };
+    const data = { title, project, state, current, end, seq, subagent };
+    this.#logCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, data });
+    return { ...data, mtimeMs: stat.mtimeMs };
   }
+
+  async get(id) {
+    id = rawId(this.client, id);
+    if (!validName(id)) return null;
+    const live = this.heartbeat(id), file = this.log(id);
+    if (!live && !file) return null;
+    let title = live?.title || id, project = live?.project || null, state = 'unknown', current = null, end = 0, seq = 0, updatedAt = live?.at ?? 0;
+    if (file) {
+      const scanned = await this.#scanLog(file, title, project);
+      if (scanned.subagent) return null;
+      ({ title, project, state, current, end, seq, mtimeMs: updatedAt } = scanned);
+    }
+    return {
+      id: canonical(this.client, id), rawId: id, client: this.client, title, project, state,
+      reachable: Boolean(live), reason: live ? null : 'The standalone messenger plugin has not checked in within 25 seconds.',
+      updatedAt, file, _end: end, _seq: seq, _current: current,
+    };
+  }
+
   async list({ limit = 50, offset = 0 } = {}) {
-    const ids = new Set(entries(path.join(this.channel, 'sessions')).filter(e => e.isFile() && e.name.endsWith('.json')).map(e => e.name.slice(0, -5)).filter(id => validName(id) && this.heartbeat(id)));
-    if (this.client === 'claude') for (const entry of entries(path.join(this.config.claudeHome, 'sessions'))) {
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-      const session = readJson(path.join(this.config.claudeHome, 'sessions', entry.name));
-      if (!session?.sessionId || session.pidDomain && session.pidDomain !== process.platform) continue;
-      if (session.pid) {
-        try { process.kill(session.pid, 0); }
-        catch (error) { if (error.code === 'ESRCH') continue; if (error.code !== 'EPERM') throw error; }
+    const ids = new Set(this.store.activeIds());
+    if (this.client === 'claude') {
+      for (const entry of entries(path.join(this.config.claudeHome, 'sessions'))) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const session = readJson(path.join(this.config.claudeHome, 'sessions', entry.name));
+        if (!session?.sessionId || (session.pidDomain && session.pidDomain !== process.platform)) continue;
+        if (session.pid) {
+          try { process.kill(session.pid, 0); }
+          catch (error) { if (error.code === 'ESRCH') continue; if (error.code !== 'EPERM') throw error; }
+        }
+        ids.add(session.sessionId);
       }
-      ids.add(session.sessionId);
     }
     const all = [];
     for (const id of ids) {
@@ -114,26 +128,31 @@ export class ChannelAdapter {
     }
     return all.sort((a, b) => b.updatedAt - a.updatedAt).slice(offset, offset + limit);
   }
+
   async current(session) {
     return (await this.get(session.rawId))?._current || null;
   }
-  async capture(session) { return { path: session.file, offset: session._end, seq: session._seq }; }
-  async deliver(session, text, id) {
-    if (!this.heartbeat(session.rawId)) throw new DeliveryError('The standalone messenger plugin is not running in this session.');
-    const file = path.join(this.channel, 'prompts', session.rawId, `${id}.json`);
-    if (fs.existsSync(file)) throw new DeliveryError('This prompt id already exists in the plugin channel.', 'uncertain');
-    atomicJson(file, { id, text, at: Date.now(), expiresAt: Date.now() + 3600000, asUser: false });
-    return { state: 'queued' };
+
+  async capture(session) {
+    return { path: session.file, offset: session._end, seq: session._seq };
   }
+
+  async deliver(session, text, id) {
+    if (!this.heartbeat(session.rawId)) {
+      throw new DeliveryError('The standalone messenger plugin is not running in this session.');
+    }
+    return this.store.enqueue(session.rawId, id, text, { asUser: false });
+  }
+
   async read(session, message) {
-    const receipt = readJson(path.join(this.channel, 'prompts', session.rawId, `${message.id}.json`));
-    let state = receipt?.refused ? 'refused' : receipt?.expiredAt ? 'expired' : receipt?.startedAt ? 'started' : receipt?.takenAt ? 'taken' : message.state;
-    if (receipt?.text && receipt.expiresAt <= Date.now()) state = 'expired';
-    if (state === 'refused') return { state, reason: receipt.refused };
+    const { state, reason } = this.store.receipt(session.rawId, message.id, message.state);
+    if (state === 'refused') return { state, reason };
     if (!session.file) return { state, reason: 'Transcript not available yet. An explicit send_message reply still works.' };
+
     let matched = false, done = false, answer = null, turn = null, activeTurn = null;
-    const anchor = message.anchor;
-    for await (const { value: v } of records(session.file, session.file === anchor.path ? anchor.offset || 0 : 0)) {
+    const anchor = message.anchor || {};
+    const startOffset = session.file === anchor.path ? anchor.offset || 0 : 0;
+    for await (const { value: v } of readRecords(session.file, startOffset)) {
       if (session.file.endsWith('.zstd') && (v.seq || 0) <= (anchor.seq || 0)) continue;
       if (this.client === 'claude') {
         if (v.isSidechain || v.type?.startsWith('api-request')) continue;
@@ -145,7 +164,9 @@ export class ChannelAdapter {
           const text = textContent(v.message.content);
           if (text) answer = text;
           if (['end_turn', 'stop_sequence'].includes(v.message.stop_reason)) done = true;
-        } else if (matched && v.type === 'system' && ['turn_duration', 'stop_hook_summary'].includes(v.subtype)) done = true;
+        } else if (matched && v.type === 'system' && ['turn_duration', 'stop_hook_summary'].includes(v.subtype)) {
+          done = true;
+        }
       } else {
         if (v.type === 'turn/start') { if (matched) { done = true; break; } activeTurn = String(v.data.turn); }
         if (v.type === 'user/message' && v.data?.source?.kind === 'user') {

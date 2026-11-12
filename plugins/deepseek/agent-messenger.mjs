@@ -17,7 +17,7 @@ export function apply(ctx, config) {
 
 export function start(ctx, channel, options = {}) {
   const now = options.now || Date.now, host = options.host || process.pid;
-  const timers = [], checked = new Set(), notes = new Set(), queues = new Map();
+  const timers = [], watchers = new Map(), checked = new Set(), notes = new Set(), queues = new Map();
   const file = (...parts) => path.join(channel, ...parts);
   const write = (target, value) => {
     fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -28,10 +28,24 @@ export function start(ctx, channel, options = {}) {
   const report = error => process.stderr.write(`agent-messenger plugin: ${error.message}\n`);
   const safeRun = work => { try { Promise.resolve(work()).catch(report); } catch (error) { report(error); } };
   const roots = () => ctx.agents.list().filter(a => safe(a.id) && !a.parent);
+  const ensureWatcher = id => {
+    if (watchers.has(id)) return;
+    const folder = file('prompts', id);
+    try {
+      fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+      const watcher = fs.watch(folder, { persistent: false }, () => safeRun(prompts));
+      watcher.on('error', () => {});
+      watchers.set(id, watcher);
+    } catch {}
+  };
   const checkIns = () => {
     const open = new Set();
-    for (const a of roots()) { open.add(a.id); checked.add(a.id); write(file('sessions', `${a.id}.json`), { at: now(), host, channelVersion: 1 }); }
-    for (const id of checked) if (!open.has(id)) { write(file('sessions', `${id}.json`), { ended: now() }); checked.delete(id); }
+    for (const a of roots()) { open.add(a.id); checked.add(a.id); ensureWatcher(a.id); write(file('sessions', `${a.id}.json`), { at: now(), host, channelVersion: 1 }); }
+    for (const id of checked) if (!open.has(id)) {
+      write(file('sessions', `${id}.json`), { ended: now() });
+      checked.delete(id);
+      const w = watchers.get(id); if (w) { try { w.close(); } catch {} watchers.delete(id); }
+    }
   };
   const prompts = () => {
     for (const a of roots()) {
@@ -66,11 +80,13 @@ export function start(ctx, channel, options = {}) {
   });
   const tick = () => { checkIns(); prompts(); };
   safeRun(checkIns);
-  for (const [ms, work] of [[5000, checkIns], [1000, prompts]]) {
+  for (const [ms, work] of [[5000, checkIns], [5000, prompts]]) {
     const timer = setInterval(() => safeRun(work), ms); timer.unref(); timers.push(timer);
   }
   return { tick, stop() {
     timers.forEach(clearInterval);
+    for (const w of watchers.values()) { try { w.close(); } catch {} }
+    watchers.clear();
     for (const id of checked) write(file('sessions', `${id}.json`), { ended: now() });
     for (const note of notes) fs.rmSync(note, { force: true });
   } };
