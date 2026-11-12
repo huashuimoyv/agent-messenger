@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "dashboard": "node --disable-warning=ExperimentalWarning scripts/dashboard.mjs",
     "start": "node --disable-warning=ExperimentalWarning src/server.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.mjs",
     "check-upstream": "node scripts/check-upstream.mjs"
