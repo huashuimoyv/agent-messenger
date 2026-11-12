@@ -57,7 +57,7 @@ export default function (pi) {
         try {
           const prompt = JSON.parse(readFileSync(targetPath, 'utf8'));
           if (typeof prompt?.text !== 'string' || !SAFE_ID.test(prompt.id)) continue;
-          if (prompt.takenAt || prompt.refused || prompt.expiredAt) continue;
+          if (prompt.takenAt || prompt.refused || prompt.expiredAt || existsSync(targetPath.replace(/\.json$/, '.expired')) || existsSync(targetPath + '.expired')) continue;
           pending.push({ targetPath, prompt });
         } catch {}
       }

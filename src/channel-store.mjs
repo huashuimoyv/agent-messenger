@@ -25,7 +25,7 @@ export class FileChannel {
         const cutoff = Date.now() - RETENTION_MS;
         for (const folder of entries(promptsRoot).filter(e => e.isDirectory())) {
           const dir = path.join(promptsRoot, folder.name);
-          for (const entry of entries(dir).filter(e => e.isFile() && e.name.endsWith('.json'))) {
+          for (const entry of entries(dir).filter(e => e.isFile() && (e.name.endsWith('.json') || e.name.endsWith('.expired')))) {
             const target = path.join(dir, entry.name);
             try {
               if (fs.statSync(target).mtimeMs < cutoff) fs.rmSync(target, { force: true });
@@ -107,22 +107,33 @@ export class FileChannel {
 
   receipt(rawId, messageId, fallbackState = 'queued') {
     const file = path.join(this.root, 'prompts', rawId, `${messageId}.json`);
-    const raw = readJson(file);
+    const expiredMarker = file.replace(/\.json$/, '.expired');
+    const hasMarker = fs.existsSync(expiredMarker) || fs.existsSync(file + '.expired');
+    let raw = readJson(file);
     const sessionFile = path.join(this.root, 'sessions', `${rawId}.json`);
     const sessionRaw = readJson(sessionFile);
 
+    // Prioritize concrete progress states (refused, started, taken).
+    // An already claimed or started prompt must never be falsely marked expired or overwritten.
     let state = raw?.refused ? 'refused'
-      : raw?.expiredAt ? 'expired'
       : raw?.startedAt ? 'started'
       : raw?.takenAt ? 'taken'
+      : (raw?.expiredAt || hasMarker) ? 'expired'
       : (fallbackState || 'queued');
 
     // Only un-taken, un-started prompts expire due to TTL or ended session
     if (raw?.text && !raw.takenAt && !raw.startedAt) {
       if (raw.expiresAt <= Date.now() || sessionRaw?.ended) {
-        state = 'expired';
-        if (!raw.expiredAt && fs.existsSync(file)) {
-          try { atomicJson(file, { ...raw, expiredAt: Date.now() }); } catch {}
+        // Double check disk to prevent clobbering an in-flight claim by another process
+        const current = readJson(file);
+        if (current?.startedAt || current?.takenAt || current?.refused) {
+          raw = current;
+          state = current.refused ? 'refused' : current.startedAt ? 'started' : 'taken';
+        } else {
+          state = 'expired';
+          if (!hasMarker && fs.existsSync(file)) {
+            try { fs.writeFileSync(expiredMarker, JSON.stringify({ at: Date.now() })); } catch {}
+          }
         }
       }
     }
@@ -132,7 +143,10 @@ export class FileChannel {
   watchTargets(rawId, messageId) {
     if (!this.root || !rawId) return [];
     const list = [path.join(this.root, 'sessions', `${rawId}.json`)];
-    if (messageId) list.push(path.join(this.root, 'prompts', rawId, `${messageId}.json`));
+    if (messageId) {
+      list.push(path.join(this.root, 'prompts', rawId, `${messageId}.json`));
+      list.push(path.join(this.root, 'prompts', rawId, `${messageId}.expired`));
+    }
     return list;
   }
 }

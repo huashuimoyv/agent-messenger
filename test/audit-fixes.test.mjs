@@ -279,8 +279,8 @@ test('Round 2 - 3. Expired prompt persists expiredAt to disk and Pi adapter pres
   const receipt = store.receipt(rawId, msgId);
   assert.equal(receipt.state, 'expired');
 
-  const onDisk = JSON.parse(fs.readFileSync(promptFile, 'utf8'));
-  assert.ok(onDisk.expiredAt, 'expiredAt must be written to disk to avoid re-delivery on restart');
+  const hasMarker = fs.existsSync(promptFile.replace(/\.json$/, '.expired')) || fs.existsSync(promptFile + '.expired');
+  assert.ok(hasMarker, 'expired marker must be written to disk to avoid re-delivery on restart');
 
   // Verify Pi adapter read() returns expired (not started)
   const piAdapter = new PiAdapter({ home: root, data: root, piChannel: root });
@@ -442,4 +442,120 @@ test('Round 2 - 3b. Antigravity offline session with correlationUnsafe message r
   const getRes = await messenger.get({ id: 'm-ag-unsafe' }, { threadId: 'test' });
   assert.equal(getRes.state, 'expired', 'Messenger.get must return expired for offline unconfirmed session');
   assert.match(getRes.reason, /offline/i);
+});
+
+test('Round 2 - 3c. Concurrent claim by worker is not overwritten by reader receipt()', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-r2-3c-'));
+  const store = new FileChannel(root);
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const rawId = 'session-race-target';
+  const msgId = 'm-race-claim';
+  const promptDir = path.join(root, 'prompts', rawId);
+  fs.mkdirSync(promptDir, { recursive: true });
+  const promptFile = path.join(promptDir, `${msgId}.json`);
+
+  // Prompt initially queued with past expiration
+  fs.writeFileSync(promptFile, JSON.stringify({
+    id: msgId,
+    text: 'race prompt',
+    expiresAt: Date.now() - 1000,
+  }));
+
+  // Session ended file
+  const sessionDir = path.join(root, 'sessions');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(path.join(sessionDir, `${rawId}.json`), JSON.stringify({
+    ended: Date.now() - 2000,
+  }));
+
+  // Simulate another process claiming and starting the prompt
+  const takenAt = Date.now();
+  const startedAt = Date.now() + 5;
+  fs.writeFileSync(promptFile, JSON.stringify({
+    id: msgId,
+    text: 'race prompt',
+    expiresAt: Date.now() - 1000,
+    takenAt,
+    startedAt,
+  }));
+
+  // receipt() must recognize started state and must NOT overwrite the file or wipe takenAt/startedAt
+  const receipt = store.receipt(rawId, msgId);
+  assert.equal(receipt.state, 'started', 'Must respect claim and return started');
+
+  const onDisk = JSON.parse(fs.readFileSync(promptFile, 'utf8'));
+  assert.equal(onDisk.takenAt, takenAt, 'takenAt must not be wiped out by reader');
+  assert.equal(onDisk.startedAt, startedAt, 'startedAt must not be wiped out by reader');
+});
+
+test('Round 2 - 6b. Dashboard does not permanently cache expired and reads late done answer on second poll without journal change', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-r2-6b-'));
+  const config = { ...configuration(), data: root };
+  const journal = new Journal(root);
+  const port = 3796;
+
+  let adapterReads = 0;
+  let mockState = 'expired';
+  let mockAnswer = null;
+
+  const mockAdapter = {
+    client: 'codex',
+    list: async () => [],
+    read: async () => {
+      adapterReads++;
+      return { state: mockState, answer: mockAnswer };
+    },
+  };
+
+  const instance = startDashboardServer({ config, adapters: [mockAdapter], port });
+  t.after(async () => {
+    await instance.close();
+    journal.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const record = {
+    id: 'm-db-expired-late-done',
+    requestKey: 'req:exp:late:done',
+    fingerprint: 'fp',
+    fromId: 'ag:1',
+    toId: 'codex:1',
+    fromClient: 'antigravity',
+    toClient: 'codex',
+    sentAt: Date.now(),
+    chain: 'c-exp',
+    pass: 1,
+    kind: 'send',
+    replyTo: null,
+    replyId: null,
+    state: 'expired',
+    reason: 'Initial expiration',
+    anchor: {},
+  };
+  journal.reserve(record);
+
+  // Poll 1: adapter returns expired
+  const res1 = await fetch(`http://127.0.0.1:${port}/api/state`);
+  const data1 = await res1.json();
+  const msg1 = data1.messages.find(m => m.id === 'm-db-expired-late-done');
+  assert.ok(msg1);
+  assert.equal(msg1.state, 'expired');
+  assert.equal(adapterReads, 1, 'First poll must read adapter');
+
+  // Simulate late completion in native transcript:
+  // Journal row in SQLite is UNCHANGED (still expired), but adapter now sees done + answer
+  mockState = 'done';
+  mockAnswer = 'Late reliable answer from transcript';
+
+  // Poll 2: dashboard must NOT serve cached expired; must call adapter again and upgrade to done
+  const res2 = await fetch(`http://127.0.0.1:${port}/api/state`);
+  const data2 = await res2.json();
+  const msg2 = data2.messages.find(m => m.id === 'm-db-expired-late-done');
+  assert.ok(msg2);
+  assert.equal(adapterReads, 2, 'Second poll must query adapter again instead of permanent expired cache');
+  assert.equal(msg2.state, 'done', 'Dashboard must adopt late done state');
+  assert.equal(msg2.answer, 'Late reliable answer from transcript', 'Dashboard must return late answer');
 });

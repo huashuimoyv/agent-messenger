@@ -52,7 +52,7 @@ export function start(ctx, channel, options = {}) {
       const folder = file('prompts', a.id);
       if (!fs.existsSync(folder)) continue;
       const pending = fs.readdirSync(folder).filter(n => n.endsWith('.json')).map(n => ({ target: path.join(folder, n), prompt: JSON.parse(fs.readFileSync(path.join(folder, n), 'utf8')) }))
-        .filter(({ prompt: p }) => typeof p.text === 'string' && safe(p.id) && !p.takenAt && !p.expiredAt && !p.refused)
+        .filter(({ prompt: p, target }) => typeof p.text === 'string' && safe(p.id) && !p.takenAt && !p.expiredAt && !p.refused && !fs.existsSync(target.replace(/\.json$/, '.expired')) && !fs.existsSync(target + '.expired'))
         .sort((a, b) => a.prompt.at - b.prompt.at || a.prompt.id.localeCompare(b.prompt.id));
       for (const { target, prompt } of pending) {
         if (prompt.expiresAt <= now()) { write(target, { expiredAt: now() }); continue; }

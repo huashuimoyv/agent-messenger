@@ -119,7 +119,7 @@ async function resolveMessageDetails(record, adapterMap) {
     reason
   };
 
-  if (['done', 'replied', 'refused', 'expired'].includes(effectiveState) && record.state === effectiveState) {
+  if (['done', 'replied', 'refused'].includes(effectiveState) && record.state === effectiveState) {
     messageDetailsCache.set(cacheKey, result);
   }
 
