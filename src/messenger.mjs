@@ -222,14 +222,8 @@ export class Messenger {
     let record;
     try {
       record = this.journal.update(id, { state: delivery.state, reason: delivery.reason || null });
-      if (reply && !['refused', 'uncertain'].includes(record.state)) {
+      if (reply && reply.fromId === target.id && !['refused', 'uncertain'].includes(record.state)) {
         this.journal.settleReply(reply.id, id);
-        if (reply.chain && reply.chain !== reply.id) {
-          const rootMsg = this.journal.get(reply.chain);
-          if (rootMsg) {
-            this.journal.settleReply(rootMsg.id, id);
-          }
-        }
       }
     } catch (error) {
       return { id, state: 'uncertain', pass: chain.pass, reason: `Delivery may have happened; journal update failed: ${error.message}. Do not resend with a new request_id.` };

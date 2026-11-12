@@ -703,3 +703,90 @@ test('Round 2 - 3e. Claude hook intercepts prompts with .expired or .cancel mark
   const expWritten = JSON.parse(written.get(`${folder}/m-exp.json`));
   assert.ok(expWritten.cancelledAt);
 });
+
+test('Round 2 - 4. Third-party forwarding with reply_to does not settle parent message; reply to original sender settles parent', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-r2-4-'));
+  const config = { data: root, passLimit: 10 };
+
+  const sessions = [
+    { id: 'codex:a', rawId: 'a', client: 'codex', title: 'Session A', project: root, state: 'idle', reachable: true },
+    { id: 'antigravity:b', rawId: 'b', client: 'antigravity', title: 'Session B', project: root, state: 'idle', reachable: true },
+    { id: 'pi:c', rawId: 'c', client: 'pi', title: 'Session C', project: root, state: 'idle', reachable: true },
+  ];
+
+  const answers = new Map();
+  const prompts = new Map();
+  const makeAdapter = client => ({
+    client,
+    list: async () => sessions.filter(s => s.client === client),
+    get: async id => sessions.find(s => s.client === client && (s.id === id || s.rawId === id)) || null,
+    capture: async () => ({}),
+    current: async s => prompts.has(s.id) ? { text: prompts.get(s.id) } : null,
+    deliver: async (s, text, id) => {
+      prompts.set(s.id, text);
+      return { state: 'queued' };
+    },
+    read: async (s, m) => answers.get(m.id) || {},
+  });
+
+  const messenger = new Messenger(config, [makeAdapter('codex'), makeAdapter('antigravity'), makeAdapter('pi')], {});
+  const messengerC = new Messenger(config, [makeAdapter('codex'), makeAdapter('antigravity'), makeAdapter('pi')], {
+    AGENT_MESSENGER_CLIENT: 'pi',
+    AGENT_MESSENGER_SESSION_ID: 'c',
+  });
+
+  t.after(() => {
+    messenger.close();
+    messengerC.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const metaA = { threadId: 'a' };
+  const metaB = { 'antigravity.google/conversation_id': 'b' };
+
+  // 1. Session A sends m1 to Session B
+  const m1 = await messenger.send({ to: 'antigravity:b', text: 'Task from A to B' }, metaA);
+  assert.equal(m1.state, 'queued');
+  let m1Record = messenger.journal.get(m1.id);
+  assert.equal(m1Record.replyId, null);
+
+  // 2. Session B receives m1, forwards to Session C (third party) referencing reply_to: m1.id
+  const m2 = await messenger.send({ to: 'pi:c', reply_to: m1.id, text: 'Forward from B to C' }, metaB);
+  assert.equal(m2.state, 'queued');
+  assert.equal(m2.pass, 2);
+
+  // Assert m1 is NOT settled because m2 was sent to C, not A (reply.fromId !== target.id)
+  m1Record = messenger.journal.get(m1.id);
+  assert.equal(m1Record.replyId, null, 'Forwarding to third session C must NOT settle m1');
+
+  // 3. Session C replies back to Session B
+  const m3 = await messengerC.send({ reply_to: m2.id, text: 'C answers B' }, {});
+  assert.equal(m3.state, 'queued');
+  const m2Record = messenger.journal.get(m2.id);
+  assert.equal(m2Record.replyId, m3.id, 'C replying to B must settle m2');
+
+  // m1 is still untouched
+  m1Record = messenger.journal.get(m1.id);
+  assert.equal(m1Record.replyId, null, 'C replying to B must NOT settle m1');
+
+  // 4. Session B replies to Session A omitting `to` (using reply_to: m1.id)
+  const m4 = await messenger.send({ reply_to: m1.id, text: 'B answers A with results' }, metaB);
+  assert.equal(m4.state, 'queued');
+  assert.equal(messenger.journal.get(m4.id).toId, 'codex:a');
+
+  // Assert m1 is now settled with m4.id
+  m1Record = messenger.journal.get(m1.id);
+  assert.equal(m1Record.replyId, m4.id, 'Replying to A must settle m1');
+
+  // Session A inspects m1
+  const m1Got = await messenger.get({ id: m1.id }, metaA);
+  assert.equal(m1Got.state, 'replied');
+  assert.equal(m1Got.reply, m4.id);
+
+  // 5. Test explicit `to: codex` with reply_to also targets the exact sender session
+  const m5 = await messenger.send({ to: 'antigravity:b', text: 'Another task from A to B' }, metaA);
+  const m6 = await messenger.send({ to: 'codex', reply_to: m5.id, text: 'B replies with explicit to: codex' }, metaB);
+  assert.equal(messenger.journal.get(m6.id).toId, 'codex:a');
+  const m5Record = messenger.journal.get(m5.id);
+  assert.equal(m5Record.replyId, m6.id, 'Explicit to: codex must route to A and settle m5');
+});
