@@ -40,7 +40,7 @@ function findUiIndex() {
 async function resolveMessageDetails(record, adapterMap) {
   const cacheKey = record.id;
   const cached = messageDetailsCache.get(cacheKey);
-  if (cached && (record.state === 'done' || record.state === 'refused' || record.state === 'replied')) {
+  if (cached && (record.state === 'done' || record.state === 'refused' || record.state === 'replied' || record.state === 'expired')) {
     return cached;
   }
 
@@ -49,6 +49,25 @@ async function resolveMessageDetails(record, adapterMap) {
   let reason = record.reason || null;
   const anchor = typeof record.anchor === 'string' ? JSON.parse(record.anchor || '{}') : (record.anchor || {});
 
+  const targetAdapter = adapterMap.get(record.toClient);
+  const rawId = record.toId.includes(':') ? record.toId.split(':').slice(1).join(':') : record.toId;
+  let sessionObj = null;
+
+  try {
+    if (targetAdapter?.get) {
+      sessionObj = await targetAdapter.get(rawId);
+    }
+  } catch {}
+
+  if (!sessionObj) {
+    sessionObj = {
+      id: record.toId,
+      rawId,
+      _file: anchor.path || anchor.file
+    };
+  }
+
+  let readRes = null;
   try {
     if (record.toClient === 'antigravity' && anchor.path && fs.existsSync(anchor.path)) {
       for await (const { value } of jsonLines(anchor.path, anchor.offset || 0)) {
@@ -60,7 +79,7 @@ async function resolveMessageDetails(record, adapterMap) {
       }
     } else if (record.toClient === 'pi') {
       const piAdapter = adapterMap.get('pi');
-      const file = anchor.file || (piAdapter?.findSessionFile ? piAdapter.findSessionFile(record.toId.replace(/^pi:/, '')) : null);
+      const file = anchor.file || (piAdapter?.findSessionFile ? piAdapter.findSessionFile(rawId) : null);
       if (file && fs.existsSync(file)) {
         for await (const { value } of jsonLines(file, anchor.offset || 0)) {
           if (value.type === 'message' && value.message?.role === 'user') {
@@ -72,14 +91,8 @@ async function resolveMessageDetails(record, adapterMap) {
       }
     }
 
-    const targetAdapter = adapterMap.get(record.toClient);
     if (targetAdapter && targetAdapter.read && record.state !== 'refused') {
-      const sessionObj = {
-        id: record.toId,
-        rawId: record.toId.includes(':') ? record.toId.split(':').slice(1).join(':') : record.toId,
-        _file: anchor.path || anchor.file
-      };
-      const readRes = await targetAdapter.read(sessionObj, { ...record, anchor });
+      readRes = await targetAdapter.read(sessionObj, { ...record, anchor });
       if (readRes) {
         if (readRes.answer) answer = readRes.answer.trim();
         if (readRes.reason && !reason) reason = readRes.reason;
@@ -89,14 +102,17 @@ async function resolveMessageDetails(record, adapterMap) {
     // Ignore extraction errors gracefully
   }
 
+  const effectiveState = record.replyId ? 'replied' : (readRes?.state || record.state);
+
   const result = {
     text: text || `[${record.kind}] ${record.fromClient} -> ${record.toClient}`,
-    answer: answer || (record.state === 'refused' ? (reason || '请求被拒绝') : ''),
+    answer: answer || (effectiveState === 'refused' ? (reason || '请求被拒绝') : ''),
     title: extractTitle(text, record.id),
+    state: effectiveState,
     reason
   };
 
-  if (record.state === 'done' || record.state === 'refused' || record.state === 'replied') {
+  if (effectiveState === 'done' || effectiveState === 'refused' || effectiveState === 'replied' || effectiveState === 'expired') {
     messageDetailsCache.set(cacheKey, result);
   }
 
@@ -108,7 +124,7 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
 
   const targetPort = Number(process.env.AGENT_MESSENGER_PORT) || port;
   const adapterMap = new Map((adapters || []).map(a => [a.client, a]));
-  const uiPath = findUiIndex();
+  const sockets = new Set();
 
   async function getState() {
     const clientLatest = new Map();
@@ -125,13 +141,18 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
               else if (s.client === 'pi') model = 'Gemini 4 Carbon';
             }
 
+            const resolvedState = s.state === 'running' ? 'running'
+              : s.state === 'idle' ? 'idle'
+              : s.state === 'offline' ? 'offline'
+              : (s.idle === false ? 'running' : s.idle === true ? 'idle' : (s.state || 'unknown'));
+
             const formatted = {
               id: s.id,
               client: s.client,
               model,
               workspace: s.project || s.workspace || '',
-              state: s.idle === false ? 'running' : (s.reachable === false ? 'offline' : 'idle'),
-              reachable: s.reachable !== false
+              state: resolvedState,
+              reachable: s.reachable
             };
 
             const existing = clientLatest.get(s.client);
@@ -151,21 +172,7 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
       }
     }
 
-    const topSessions = [];
-    for (const client of ['antigravity', 'codex', 'pi']) {
-      if (clientLatest.has(client)) {
-        topSessions.push(clientLatest.get(client));
-      } else {
-        topSessions.push({
-          id: `${client}:local`,
-          client,
-          model: client === 'antigravity' ? 'Gemini 3.8 Flash' : (client === 'codex' ? 'GPT-6.1 Sol' : 'Gemini 4 Carbon'),
-          workspace: 'E:\\Ameath',
-          state: 'idle',
-          reachable: true
-        });
-      }
-    }
+    const sessions = [...clientLatest.values()];
 
     const dbPath = path.join(config.data, 'messages.sqlite');
     const messages = [];
@@ -185,7 +192,7 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
             kind: row.kind,
             replyTo: row.replyTo || undefined,
             replyId: row.replyId || undefined,
-            state: row.state,
+            state: details.state || row.state,
             title: details.title,
             text: details.text,
             answer: details.answer || undefined,
@@ -199,58 +206,97 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
 
     return {
       passLimit: config.passLimit || 10,
-      sessions: topSessions,
+      sessions,
       messages
     };
   }
 
   const server = http.createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    try {
+      // Safe CORS: only permit localhost / 127.0.0.1 / [::1] origins
+      const origin = req.headers.origin;
+      if (origin) {
+        try {
+          const originUrl = new URL(origin);
+          if (originUrl.hostname === 'localhost' || originUrl.hostname === '127.0.0.1' || originUrl.hostname === '[::1]') {
+            res.setHeader('Access-Control-Allow-Origin', origin);
+            res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+            res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+          }
+        } catch {}
+      }
 
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
 
-    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+      // Reject malformed Host header before URL processing
+      if (req.headers.host) {
+        try {
+          new URL(`http://${req.headers.host}`);
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Bad Request');
+          return;
+        }
+      }
 
-    if (url.pathname === '/api/state') {
+      // Safe URL parsing with fixed local base
+      let url;
       try {
-        const state = await getState();
-        res.writeHead(200, {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'no-store'
-        });
-        res.end(JSON.stringify(state));
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: err.message }));
+        url = new URL(req.url, 'http://127.0.0.1:3721');
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Bad Request');
+        return;
       }
-      return;
-    }
 
-    if (url.pathname === '/' || url.pathname === '/index.html') {
-      const currentUi = findUiIndex();
-      if (currentUi && fs.existsSync(currentUi)) {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        fs.createReadStream(currentUi).pipe(res);
-      } else {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('ui/index.html not found');
+      if (url.pathname === '/api/state') {
+        try {
+          const state = await getState();
+          res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store'
+          });
+          res.end(JSON.stringify(state));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
       }
-      return;
-    }
 
-    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Not Found');
+      if (url.pathname === '/' || url.pathname === '/index.html') {
+        const currentUi = findUiIndex();
+        if (currentUi && fs.existsSync(currentUi)) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          fs.createReadStream(currentUi).pipe(res);
+        } else {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('ui/index.html not found');
+        }
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Not Found');
+    } catch (err) {
+      try {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Internal Server Error');
+      } catch {}
+    }
+  });
+
+  server.on('connection', socket => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
   });
 
   server.on('error', err => {
     if (err.code === 'EADDRINUSE') {
-      // Gracefully ignore if another process is already hosting the dashboard
       return;
     }
     process.stderr.write(`[Agent Messenger Dashboard Warning] ${err.message}\n`);
@@ -258,13 +304,17 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
 
   try {
     server.listen(targetPort, host, () => {
-      // Prevent HTTP server from keeping stdio MCP process alive upon client exit
       server.unref();
     });
   } catch {}
 
   return {
     server,
-    close: () => new Promise(r => server.close(r))
+    close: () => new Promise(r => {
+      for (const s of sockets) {
+        try { s.destroy(); } catch {}
+      }
+      server.close(r);
+    })
   };
 }

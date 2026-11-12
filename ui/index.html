@@ -323,7 +323,17 @@ function buildChains(messages) {
   return [...map.entries()].map(([id, list]) => {
     list.sort((a, b) => a.sentAt - b.sentAt);
     const first = list[0], last = list[list.length - 1];
-    return { id, list, first, last, state: last.state, pass: Math.max(...list.map(x => x.pass)),
+    let chainState = last.state;
+    if (list.some(m => m.state === 'replied' || m.replyId)) {
+      chainState = 'replied';
+    } else if (list.some(m => m.state === 'done')) {
+      chainState = 'done';
+    } else if (list.some(m => m.state === 'refused')) {
+      chainState = 'refused';
+    } else if (list.some(m => m.state === 'expired')) {
+      chainState = 'expired';
+    }
+    return { id, list, first, last, state: chainState, pass: Math.max(...list.map(x => x.pass)),
       title: first.title || firstLine(first.text) || first.id, updated: last.sentAt };
   }).sort((a, b) => b.updated - a.updated);
 }
@@ -419,9 +429,10 @@ function renderDetail() {
     clock(c.first.sentAt, true),
     s.cur >= 1 && !(s.fail && s.cur === 1) ? agent(c.last.toClient).name : (s.fail && s.cur === 1 ? s.label : ''),
     c.state === 'started' ? `已运行 <span data-elapsed="${c.last.sentAt}">${elapsed(c.last.sentAt)}</span>` : c.state === 'taken' ? '等待开始' : (s.fail && s.cur === 2 ? s.label : ''),
-    s.cur >= 4 ? (c.list.length > 1 ? '已闭环' : s.label) : '',
+    s.cur >= 4 ? (c.list.length > 1 || c.state === 'replied' ? '已闭环' : s.label) : '',
   ];
   if (c.state === 'queued') sub[1] = '等待目标空闲';
+  if (c.state === 'expired') { sub[1] = '目标已断开'; sub[2] = '会话已结束'; }
   const steps = STEPS.map((name, i) => {
     let cls = 'pending', inner = '';
     if (i < s.cur) { cls = 'done'; inner = ICON.check; }

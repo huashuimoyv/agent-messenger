@@ -3,7 +3,17 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DeliveryError } from './io.mjs';
 
-const STATE_RANK = { uncertain: 0, queued: 1, taken: 2, started: 3, done: 4 };
+const TERMINAL_SET = new Set(['done', 'replied', 'refused', 'expired']);
+const STATE_RANK = {
+  uncertain: 0,
+  expired: 1,
+  queued: 2,
+  taken: 3,
+  started: 4,
+  refused: 5,
+  done: 6,
+  replied: 7,
+};
 const ALLOWED_PATCH_FIELDS = new Set(['state', 'reason', 'anchor', 'turn', 'replyId', 'toId']);
 
 export class Journal {
@@ -73,9 +83,16 @@ export class Journal {
     try {
       const old = this.get(id);
       const next = { ...patch };
-      if (next.state in STATE_RANK && old.state in STATE_RANK && STATE_RANK[next.state] < STATE_RANK[old.state]) {
-        delete next.state;
-        delete next.reason;
+      if (old && next.state) {
+        if (TERMINAL_SET.has(old.state)) {
+          if (!TERMINAL_SET.has(next.state) || (old.state === 'replied' && next.state !== 'replied') || (old.state === 'done' && ['expired', 'uncertain'].includes(next.state))) {
+            delete next.state;
+            delete next.reason;
+          }
+        } else if (next.state in STATE_RANK && old.state in STATE_RANK && STATE_RANK[next.state] < STATE_RANK[old.state]) {
+          delete next.state;
+          delete next.reason;
+        }
       }
       const keys = Object.keys(next);
       if (keys.length) {

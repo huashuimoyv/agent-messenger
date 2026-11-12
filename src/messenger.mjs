@@ -252,6 +252,10 @@ export class Messenger {
         }
         if (observed.replyId && !record.replyId) patch.replyId = observed.replyId;
         record = this.journal.update(record.id, patch);
+      } else if (!TERMINAL_STATES.has(record.state)) {
+        // Target session is no longer discoverable or has ended
+        const patch = { state: 'expired', reason: 'Target session is no longer discoverable or has ended.' };
+        record = this.journal.update(record.id, patch);
       }
     }
     if (record.replyTo && !['refused', 'uncertain'].includes(record.state)) {

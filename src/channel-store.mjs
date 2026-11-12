@@ -108,13 +108,22 @@ export class FileChannel {
   receipt(rawId, messageId, fallbackState = 'queued') {
     const file = path.join(this.root, 'prompts', rawId, `${messageId}.json`);
     const raw = readJson(file);
+    const sessionFile = path.join(this.root, 'sessions', `${rawId}.json`);
+    const sessionRaw = readJson(sessionFile);
+
     let state = raw?.refused ? 'refused'
       : raw?.expiredAt ? 'expired'
       : raw?.startedAt ? 'started'
       : raw?.takenAt ? 'taken'
       : (fallbackState || 'queued');
-    if (raw?.text && raw.expiresAt <= Date.now()) state = 'expired';
-    return { state, reason: state === 'refused' ? String(raw.refused) : null, raw };
+
+    // Only un-taken, un-started prompts expire due to TTL or ended session
+    if (raw?.text && !raw.takenAt && !raw.startedAt) {
+      if (raw.expiresAt <= Date.now() || sessionRaw?.ended) {
+        state = 'expired';
+      }
+    }
+    return { state, reason: state === 'refused' ? String(raw.refused) : (state === 'expired' && sessionRaw?.ended ? 'Target session ended before prompt was processed' : null), raw };
   }
 
   watchTargets(rawId, messageId) {
