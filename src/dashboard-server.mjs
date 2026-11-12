@@ -322,8 +322,13 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
     unref,
     close: () => new Promise(r => {
       for (const s of sockets) {
-        try { s.destroy(); } catch {}
+        try { s.end(); } catch {}
       }
+      setImmediate(() => {
+        for (const s of sockets) {
+          try { s.destroy(); } catch {}
+        }
+      });
       server.close(r);
     })
   };
