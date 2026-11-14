@@ -5,6 +5,7 @@ import { configuration } from './config.mjs';
 import { Messenger } from './messenger.mjs';
 import { createAdapters } from './adapters/index.mjs';
 import { startDashboardServer } from './dashboard-server.mjs';
+import { APP_VERSION } from './version.mjs';
 
 const config = configuration();
 const adapters = createAdapters(config);
@@ -33,7 +34,7 @@ const definitions = [
 ];
 
 const handle = serveStdio(() => {
-  const server = new McpServer({ name: 'agent-messenger', version: '0.1.0' });
+  const server = new McpServer({ name: 'agent-messenger', version: APP_VERSION });
   for (const [name, method, readOnlyHint, description, inputSchema] of definitions) {
     server.registerTool(name, {
       description,

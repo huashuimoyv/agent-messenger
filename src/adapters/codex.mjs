@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { canonical, rawId, readRecords, tailOffset, textContent, envelopeMessageId, messageBody, DeliveryError } from '../io.mjs';
 import { historyState, captureHistory, currentHistory, readHistory, readHistoryPrompt } from './codex-history.mjs';
+import { APP_VERSION } from '../version.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const APP_SERVER_TIMEOUT = 12_000;
@@ -175,7 +176,7 @@ async function appServer(executable, codexHome, launch, action) {
       }
     };
     await request('initialize', {
-      clientInfo: { name: 'agent_messenger', title: 'Agent Messenger', version: '0.1.0' },
+      clientInfo: { name: 'agent_messenger', title: 'Agent Messenger', version: APP_VERSION },
       capabilities: { experimentalApi: true },
     });
     await waitFor(writeLine(child, { method: 'initialized' }), APP_SERVER_TIMEOUT, transportFailure);

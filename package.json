@@ -22,6 +22,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "package": "node scripts/package.mjs",
     "setup": "node scripts/install.mjs",
     "doctor": "node scripts/install.mjs --check",
     "dashboard": "node --disable-warning=ExperimentalWarning scripts/dashboard.mjs",

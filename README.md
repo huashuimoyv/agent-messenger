@@ -78,11 +78,15 @@ pi install /path/to/agent-messenger
 npm ci
 npm run build
 npm test
-# Windows 构建并同步 dist/agent-messenger-runtime.zip：
+# 构建并同步 dist/agent-messenger-runtime.zip（跨平台）：
+npm run package
+# 或使用 Windows 包装脚本：
 powershell -NoProfile -File scripts/package.ps1
 # 追踪上游互发协议变更（过滤 GUI/HUD 等无关改动）：
 npm run check-upstream
 ```
+
+推送 `v*` 标签（如 `v0.2.0`）或在 GitHub Actions 手动触发 `Release` 工作流，会自动运行测试、构建 `dist/agent-messenger-runtime.zip` 并发布 GitHub Release。
 
 架构设计与审计说明见 [docs/AUDIT.md](docs/AUDIT.md)，上游追踪说明见 [docs/UPSTREAM_TRACKING.md](docs/UPSTREAM_TRACKING.md)。
 
@@ -157,10 +161,14 @@ Run `npm run dashboard` (or `open-dashboard.vbs` on Windows) and open `http://12
 npm ci
 npm run build
 npm test
-# Windows runtime bundle (dist/agent-messenger-runtime.zip):
+# Build and package dist/agent-messenger-runtime.zip (cross-platform):
+npm run package
+# Or via the Windows wrapper:
 powershell -NoProfile -File scripts/package.ps1
 # Audit upstream messaging changes only:
 npm run check-upstream
 ```
+
+Pushing a `v*` tag (e.g., `v0.2.0`) or manually triggering the `Release` workflow in GitHub Actions automatically runs tests, builds `dist/agent-messenger-runtime.zip`, and publishes the GitHub Release.
 
 See [docs/AUDIT.md](docs/AUDIT.md) for architecture details and [docs/UPSTREAM_TRACKING.md](docs/UPSTREAM_TRACKING.md) for upstream tracking rules.

@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { APP_VERSION } from '../src/version.mjs';
 
 export class McpClient {
   constructor(env = process.env) {
@@ -31,7 +32,7 @@ export class McpClient {
     });
   }
   async initialize() {
-    const info = await this.request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'agent-messenger-verifier', version: '0.1.0' } });
+    const info = await this.request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'agent-messenger-verifier', version: APP_VERSION } });
     this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
     return info;
   }
