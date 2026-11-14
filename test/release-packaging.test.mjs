@@ -429,8 +429,16 @@ process.exit(2);
 `, 'utf8');
 
   const nodeExePosix = process.execPath.replace(/\\/g, '/');
-  fs.writeFileSync(path.join(binDir, 'gh'), `#!/usr/bin/env bash\nexec "${nodeExePosix}" "${mockGhJs}" "$@"\n`, 'utf8');
-  fs.writeFileSync(path.join(binDir, 'git'), `#!/usr/bin/env bash\nif [ "$1" = "ls-remote" ]; then\n  [ "\${MOCK_TAG_EXISTS:-0}" = "1" ] && exit 0 || exit 2\nfi\nexit 0\n`, 'utf8');
+  const mockGhBin = path.join(binDir, 'gh');
+  const mockGitBin = path.join(binDir, 'git');
+  fs.writeFileSync(mockGhBin, `#!/usr/bin/env bash\nexec "${nodeExePosix}" "${mockGhJs}" "$@"\n`, { encoding: 'utf8', mode: 0o755 });
+  fs.writeFileSync(mockGitBin, `#!/usr/bin/env bash\nif [ "$1" = "ls-remote" ]; then\n  [ "\${MOCK_TAG_EXISTS:-0}" = "1" ] && exit 0 || exit 2\nfi\nexit 0\n`, { encoding: 'utf8', mode: 0o755 });
+  fs.chmodSync(mockGhBin, 0o755);
+  fs.chmodSync(mockGitBin, 0o755);
+  if (process.platform !== 'win32') {
+    assert.ok((fs.statSync(mockGhBin).mode & 0o111) !== 0, 'mock gh shim must be executable');
+    assert.ok((fs.statSync(mockGitBin).mode & 0o111) !== 0, 'mock git shim must be executable');
+  }
 
   const toPosixPath = p => p.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`);
   const testEnv = {

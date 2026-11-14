@@ -5,6 +5,7 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Journal, canTransition } from '../src/journal.mjs';
 import { Messenger } from '../src/messenger.mjs';
 import { FileChannel } from '../src/channel-store.mjs';
@@ -635,13 +636,24 @@ test('Round 2 - 3d. Pi extension consumes normal prompt and skips .expired/.canc
 test('Round 2 - 3e. Claude hook intercepts prompts with .expired or .cancel marker sidecars', async t => {
   const prevChannel = process.env.AGENT_MESSENGER_CLAUDE_CHANNEL;
   const channelDir = 'C:/mock/claude';
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-r2-3e-'));
   process.env.AGENT_MESSENGER_CLAUDE_CHANNEL = channelDir;
   t.after(() => {
     if (prevChannel !== undefined) process.env.AGENT_MESSENGER_CLAUDE_CHANNEL = prevChannel;
     else delete process.env.AGENT_MESSENGER_CLAUDE_CHANNEL;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  const { register } = await import('../plugins/claude/generated/hooks/register.ts');
+  const templatePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugins', 'claude', 'register.template.ts');
+  const template = fs.readFileSync(templatePath, 'utf8');
+  assert.ok(template.includes('__AGENT_MESSENGER_CHANNEL_JSON__'));
+  const rendered = template.replace('__AGENT_MESSENGER_CHANNEL_JSON__', JSON.stringify(channelDir));
+  assert.equal(rendered.includes('__AGENT_MESSENGER_CHANNEL_JSON__'), false);
+  fs.writeFileSync(path.join(tmpDir, 'package.json'), '{"type":"module"}\n', 'utf8');
+  const registerPath = path.join(tmpDir, 'register.ts');
+  fs.writeFileSync(registerPath, rendered, 'utf8');
+
+  const { register } = await import(pathToFileURL(registerPath).href);
   let sessionHook = null;
   register((name, hook) => {
     if (name === 'session.start') sessionHook = hook;
