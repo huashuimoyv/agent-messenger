@@ -1,12 +1,50 @@
 // Agent Messenger Pi Extension — thin event-driven transport shell.
 import { mkdirSync, writeFileSync, renameSync, readdirSync, readFileSync, rmSync, watch, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
+function hasConfiguredPiMcp(env = process.env, cwd = process.cwd()) {
+  const piHome = env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent');
+  for (const candidate of [join(piHome, 'mcp.json'), join(cwd, '.pi', 'mcp.json')]) {
+    try {
+      if (!existsSync(candidate)) continue;
+      const parsed = JSON.parse(readFileSync(candidate, 'utf8').replace(/^\uFEFF/, ''));
+      if (parsed?.mcpServers && typeof parsed.mcpServers === 'object' && Object.keys(parsed.mcpServers).some(k => k.replace(/-/g, '_') === 'agent_messenger')) {
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
 export default function (pi) {
+  if (typeof pi?.registerMcpServer === 'function') {
+    try {
+      const extDir = dirname(fileURLToPath(import.meta.url));
+      const bundlePath = resolve(extDir, '..', '..', 'dist', 'agent-messenger.mjs');
+      if (existsSync(bundlePath) && !hasConfiguredPiMcp()) {
+        const nodeCmd = process.versions?.node && /(?:^|[/\\])node(?:\.exe)?$/i.test(process.execPath)
+          ? process.execPath
+          : 'node';
+        pi.registerMcpServer('agent-messenger', {
+          command: nodeCmd,
+          args: ['--disable-warning=ExperimentalWarning', bundlePath],
+        });
+      }
+    } catch {}
+  }
+  if (typeof pi?.events?.emit === 'function' && typeof pi?.events?.on === 'function') {
+    const claim = { claimed: false };
+    pi.events.emit('agent-messenger:claim', claim);
+    if (claim.claimed) return;
+    pi.events.on('agent-messenger:claim', data => {
+      if (data && typeof data === 'object') data.claimed = true;
+    });
+  }
   const dataDir = process.env.AGENT_MESSENGER_HOME || join(process.env.LOCALAPPDATA || join(homedir(), '.local', 'share'), 'agent-messenger');
   const channel = process.env.AGENT_MESSENGER_PI_CHANNEL || join(dataDir, 'pi-channel');
   const pid = process.pid;

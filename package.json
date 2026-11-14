@@ -8,8 +8,22 @@
   "engines": {
     "node": ">=24.9.0"
   },
+  "bin": {
+    "agent-messenger": "./scripts/cli.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./plugins/pi/agent-messenger.ts"
+    ]
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "setup": "node scripts/install.mjs",
+    "doctor": "node scripts/install.mjs --check",
     "dashboard": "node --disable-warning=ExperimentalWarning scripts/dashboard.mjs",
     "start": "node --disable-warning=ExperimentalWarning src/server.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.mjs",

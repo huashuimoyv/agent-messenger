@@ -10,7 +10,9 @@ $entries = @(
     @{ Source = (Join-Path $distRoot 'THIRD_PARTY_LICENSES.txt'); Name = 'THIRD_PARTY_LICENSES.txt' },
     @{ Source = (Join-Path $projectRoot 'LICENSE'); Name = 'LICENSE' },
     @{ Source = (Join-Path $projectRoot 'NOTICE'); Name = 'NOTICE' },
-    @{ Source = (Join-Path $projectRoot 'ui/index.html'); Name = 'ui/index.html' }
+    @{ Source = (Join-Path $projectRoot 'ui/index.html'); Name = 'ui/index.html' },
+    @{ Source = (Join-Path $projectRoot 'scripts/install.mjs'); Name = 'scripts/install.mjs' },
+    @{ Source = (Join-Path $projectRoot 'plugins/pi/agent-messenger.ts'); Name = 'plugins/pi/agent-messenger.ts' }
 )
 foreach ($entry in $entries) {
     if (-not (Test-Path -LiteralPath $entry.Source -PathType Leaf)) { throw "Missing runtime input: $($entry.Source)" }
