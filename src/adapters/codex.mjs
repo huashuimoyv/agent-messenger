@@ -4,8 +4,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
-import { canonical, rawId, readRecords, tailOffset, textContent, envelopeMessageId, DeliveryError } from '../io.mjs';
-import { historyState, captureHistory, currentHistory, readHistory } from './codex-history.mjs';
+import { canonical, rawId, readRecords, tailOffset, textContent, envelopeMessageId, messageBody, DeliveryError } from '../io.mjs';
+import { historyState, captureHistory, currentHistory, readHistory, readHistoryPrompt } from './codex-history.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const APP_SERVER_TIMEOUT = 12_000;
@@ -318,6 +318,19 @@ export class CodexAdapter {
       return { state: 'uncertain', reason: 'Codex did not confirm that it queued the message.' };
     const reason = await wakeDesktop(this.config, session.rawId, this.launch);
     return { state: 'queued', ...(reason ? { reason } : {}) };
+  }
+
+  async readPrompt(session, message) {
+    if (session.historyMode === 'paginated') return readHistoryPrompt(this.config.codexHome, session, message);
+    const anchor = message.anchor || {};
+    const file = session.file && fs.existsSync(session.file) ? session.file : anchor.path;
+    if (!file || !fs.existsSync(file)) return null;
+    const start = file === anchor.path ? Number(anchor.offset || 0) : 0;
+    for await (const { value } of readRecords(file, start)) {
+      const body = messageBody(userPrompt(value), message.id);
+      if (body !== null) return body;
+    }
+    return null;
   }
 
   async read(session, message) {

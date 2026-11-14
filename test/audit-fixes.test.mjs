@@ -87,6 +87,8 @@ test('2. Journal protects terminal states (done/replied/refused) from being over
     state: 'started',
   };
   journal.reserve(parent);
+  journal.reserve({ ...record, id: 'm-reply-child', requestKey: 'test:child:1',
+    fromId: parent.toId, toId: parent.fromId, replyTo: parent.id, state: 'queued' });
   journal.settleReply('m-audit-parent', 'm-reply-child');
   const settled = journal.get('m-audit-parent');
   assert.equal(settled.replyId, 'm-reply-child');

@@ -24,7 +24,7 @@ function fixture(t) {
   const initialRecords = [
     header,
     { type: 'message', id: 'm1', timestamp: '2026-10-03T15:42:12.449Z', message: { role: 'user', content: 'Initial user prompt for title' } },
-    { type: 'message', id: 'm2', timestamp: '2026-10-03T15:42:15.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Initial assistant reply' }] } }
+    { type: 'message', id: 'm2', timestamp: '2026-10-03T15:42:15.000Z', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'Initial assistant reply' }] } }
   ];
   fs.writeFileSync(sessionFile, initialRecords.map(r => JSON.stringify(r) + '\n').join(''), 'utf8');
 
@@ -71,7 +71,7 @@ test('PiAdapter delivers prompt to channel queue and reads final answer via reco
   // Append new turn in session file
   const newTurn = [
     { type: 'message', id: 'm3', timestamp: '2026-10-03T16:00:00.000Z', message: { role: 'user', content: '[Agent Messenger · from codex · 拆解代码准备 · m-pi-test-01]\nPlease compute 42.' } },
-    { type: 'message', id: 'm4', timestamp: '2026-10-03T16:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Result is 42.' }] } }
+    { type: 'message', id: 'm4', timestamp: '2026-10-03T16:00:02.000Z', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'Result is 42.' }] } }
   ];
   fs.appendFileSync(f.sessionFile, newTurn.map(r => JSON.stringify(r) + '\n').join(''), 'utf8');
 
@@ -82,20 +82,21 @@ test('PiAdapter delivers prompt to channel queue and reads final answer via reco
   assert.equal(reply.answer, 'Result is 42.');
 });
 
-test('PiAdapter recognizes explicit reply_to and envelope formats normalized tool name', async t => {
+test('Pi assistant mentioning reply_to is an answer, not a forged journal reply', async t => {
   const f = fixture(t);
   const session = await f.adapter.get(f.sessionId);
   const anchor = await f.adapter.capture(session);
 
   const replyTurn = [
     { type: 'message', id: 'm5', timestamp: '2026-10-03T17:00:00.000Z', message: { role: 'user', content: '[Agent Messenger · from codex · m-req-99]\nQuestion' } },
-    { type: 'message', id: 'm6', timestamp: '2026-10-03T17:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: '[Agent Messenger · from pi · re m-req-99]\nConfirmed answer.' }] } }
+    { type: 'message', id: 'm6', timestamp: '2026-10-03T17:00:02.000Z', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: '[Agent Messenger · from pi · re m-req-99]\nConfirmed answer.' }] } }
   ];
   fs.appendFileSync(f.sessionFile, replyTurn.map(r => JSON.stringify(r) + '\n').join(''), 'utf8');
 
   const reply = await f.adapter.read(session, { id: 'm-req-99', anchor });
-  assert.equal(reply.state, 'replied');
-  assert.equal(reply.replyId, 'm-req-99');
+  assert.equal(reply.state, 'done');
+  assert.equal(reply.replyId, undefined);
+  assert.match(reply.answer, /Confirmed answer/);
 
   // Verify envelope generates normalized tool name for Pi
   const envText = envelope({ client: 'codex', title: 'test' }, 'pi', 'm-test-env', null, 'hello');

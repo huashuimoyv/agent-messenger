@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { canonical, rawId, entries, jsonLines, headRecords, tailOffset, textContent, DeliveryError, envelopeMessageId } from '../io.mjs';
+import { canonical, rawId, entries, jsonLines, headRecords, tailOffset, textContent, DeliveryError, envelopeMessageId, messageBody } from '../io.mjs';
 import { FileChannel } from '../channel-store.mjs';
 
 function cleanProject(dirName) {
@@ -29,6 +29,29 @@ function findPiCliScript(config) {
     }
   }
   return null;
+}
+
+// Native-history observation only: maintenance can use this without touching
+// channel receipts, expiry markers, or heartbeat files.
+export async function readPiTranscript(file, message, anchor = message.anchor || {}) {
+  if (!file || !fs.existsSync(file)) return {};
+  let matched = false;
+  for await (const { value } of jsonLines(file, anchor.offset || 0)) {
+    if (value.type !== 'message') continue;
+    const item = value.message;
+    if (item?.role === 'user') {
+      if (envelopeMessageId(textContent(item.content)) === message.id) matched = true;
+      else if (matched) break;
+    } else if (matched && item?.role === 'assistant') {
+      const hasTools = Array.isArray(item.content) && item.content.some(part => part.type === 'toolCall');
+      if (hasTools || !['stop', 'length', 'error', 'aborted'].includes(item.stopReason)) continue;
+      const answer = textContent(item.content) || null;
+      return { state: 'done', answer,
+        ...(item.stopReason !== 'stop' ? { reason: `Pi turn ended with status ${item.stopReason}.` }
+          : !answer ? { reason: 'Pi turn ended without readable answer text.' } : {}) };
+    }
+  }
+  return matched ? { state: 'started', answer: null } : {};
 }
 
 export class PiAdapter {
@@ -167,37 +190,25 @@ export class PiAdapter {
     return this.store.enqueue(session.rawId, id, text);
   }
 
+  async readPrompt(session, message) {
+    const file = session._file || this.findSessionFile(session.rawId);
+    if (!file || !fs.existsSync(file)) return null;
+    for await (const { value } of jsonLines(file, message.anchor?.offset || 0)) {
+      if (value.type !== 'message' || value.message?.role !== 'user') continue;
+      const body = messageBody(textContent(value.message.content), message.id);
+      if (body !== null) return body;
+    }
+    return null;
+  }
+
   async read(session, message, optionalAnchor) {
     const targetMessageId = typeof message === 'string' ? message : message?.id;
     const anchor = optionalAnchor || (typeof message === 'object' ? message?.anchor : null) || {};
     const file = session._file || this.findSessionFile(session.rawId);
     const { state, reason } = this.store.receipt(session.rawId, targetMessageId, message?.state || 'queued');
     if (state === 'refused') return { state, reason };
-    if (!file || !fs.existsSync(file)) return { state, answer: null };
-
-    const startOffset = anchor?.offset || 0;
-    let matchedTurn = false, finalAnswer = null, explicitReplyId = null;
-    for await (const { value } of jsonLines(file, startOffset)) {
-      if (value.type !== 'message') continue;
-      const msg = value.message;
-      if (msg?.role === 'user') {
-        const text = textContent(msg.content);
-        if (envelopeMessageId(text) === targetMessageId) matchedTurn = true;
-        else if (matchedTurn) break;
-      } else if (matchedTurn && msg?.role === 'assistant') {
-        const text = textContent(msg.content);
-        if (text) {
-          finalAnswer = text;
-          const replyMatch = text.match(/\[Agent Messenger · [^\]]*?re (m-[A-Za-z0-9_-]+)\]/);
-          if (replyMatch) explicitReplyId = replyMatch[1];
-        }
-      }
-    }
-
-    if (explicitReplyId) return { state: 'replied', answer: finalAnswer, replyId: explicitReplyId };
-    if (finalAnswer !== null) return { state: 'done', answer: finalAnswer };
-    if (['refused', 'expired'].includes(state) && !matchedTurn) return { state, reason, answer: null };
-    return { state: matchedTurn ? 'started' : (state === 'queued' ? 'queued' : 'started'), answer: null };
+    const observed = await readPiTranscript(file, { id: targetMessageId }, anchor);
+    return observed.state ? observed : { state, reason, answer: null };
   }
 
   async start(folder, text, id) {

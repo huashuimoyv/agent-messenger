@@ -3,21 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { jsonLines, textContent } from './io.mjs';
-import { canTransition } from './journal.mjs';
+import { findReply } from './journal.mjs';
+import { messageState } from './message-state.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-
-const messageDetailsCache = new Map();
-
-function cleanPrompt(raw) {
-  if (!raw) return '';
-  let text = String(raw).trim();
-  text = text.replace(/^<USER_REQUEST>\s*/i, '').replace(/\s*<\/USER_REQUEST>$/i, '');
-  text = text.replace(/^\[Agent Messenger · [^\]]+\]\s*/i, '');
-  return text.trim();
-}
 
 function extractTitle(text, id) {
   if (!text) return id;
@@ -27,10 +17,9 @@ function extractTitle(text, id) {
 
 function findUiIndex() {
   const candidates = [
+    path.join(__dirname, 'ui', 'index.html'),
     path.join(ROOT, 'ui', 'index.html'),
-    path.join(__dirname, '..', 'ui', 'index.html'),
     path.join(process.cwd(), 'ui', 'index.html'),
-    'E:\\Ameath\\agent-messenger\\ui\\index.html',
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;
@@ -38,92 +27,41 @@ function findUiIndex() {
   return null;
 }
 
-async function resolveMessageDetails(record, adapterMap) {
-  const cacheKey = `${record.id}:${record.state}:${record.replyId || ''}`;
-  const cached = messageDetailsCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  let text = '';
-  let answer = '';
-  let reason = record.reason || null;
-  const anchor = typeof record.anchor === 'string' ? JSON.parse(record.anchor || '{}') : (record.anchor || {});
-
+async function resolveMessageDetails(record, adapterMap, db) {
+  const anchor = JSON.parse(record.anchor);
   const targetAdapter = adapterMap.get(record.toClient);
-  const rawId = record.toId.includes(':') ? record.toId.split(':').slice(1).join(':') : record.toId;
-  let sessionObj = null;
-
+  const rawId = record.toId.slice(record.toClient.length + 1);
+  let session = null, text = null, observed = {}, errorReason = null, targetMissing = false;
   try {
-    if (targetAdapter?.get) {
-      sessionObj = await targetAdapter.get(rawId);
-    }
-  } catch {}
-
-  if (!sessionObj) {
-    sessionObj = {
-      id: record.toId,
-      rawId,
-      _file: anchor.path || anchor.file
-    };
+    session = await targetAdapter?.get?.(rawId);
+    targetMissing = typeof targetAdapter?.get === 'function' && !session;
+  } catch (error) {
+    errorReason = `无法读取目标会话：${error.message}`;
   }
-
-  let readRes = null;
-  try {
-    if (record.toClient === 'antigravity' && anchor.path && fs.existsSync(anchor.path)) {
-      for await (const { value } of jsonLines(anchor.path, anchor.offset || 0)) {
-        if (value.type === 'USER_INPUT' && value.source !== 'SYSTEM') {
-          const raw = typeof value.content === 'string' ? value.content : JSON.stringify(value.content);
-          text = cleanPrompt(raw);
-          break;
-        }
-      }
-    } else if (record.toClient === 'pi') {
-      const piAdapter = adapterMap.get('pi');
-      const file = anchor.file || (piAdapter?.findSessionFile ? piAdapter.findSessionFile(rawId) : null);
-      if (file && fs.existsSync(file)) {
-        for await (const { value } of jsonLines(file, anchor.offset || 0)) {
-          if (value.type === 'message' && value.message?.role === 'user') {
-            const raw = textContent(value.message.content);
-            text = cleanPrompt(raw);
-            break;
-          }
-        }
-      }
-    }
-
-    if (targetAdapter && targetAdapter.read && record.state !== 'refused') {
-      readRes = await targetAdapter.read(sessionObj, { ...record, anchor });
-      if (readRes) {
-        if (readRes.answer) answer = readRes.answer.trim();
-        if (readRes.reason && !reason) reason = readRes.reason;
-      }
-    }
-  } catch (err) {
-    // Ignore extraction errors gracefully
-  }
-
-  let effectiveState = record.state;
-  if (readRes?.state && canTransition(record.state, readRes.state)) {
-    effectiveState = readRes.state;
-  }
-  if (record.replyId || readRes?.replyId) {
-    effectiveState = 'replied';
-  }
-
-  const result = {
-    text: text || `[${record.kind}] ${record.fromClient} -> ${record.toClient}`,
-    answer: answer || (effectiveState === 'refused' ? (reason || '请求被拒绝') : ''),
-    title: extractTitle(text, record.id),
-    state: effectiveState,
-    reason
+  const readableSession = session || {
+    id: record.toId, rawId, file: anchor.path, _file: anchor.file || anchor.path,
+    historyMode: anchor.historyMode,
   };
-
-  if (['done', 'replied', 'refused'].includes(effectiveState) && record.state === effectiveState) {
-    messageDetailsCache.set(cacheKey, result);
+  try {
+    text = await targetAdapter?.readPrompt?.(readableSession, { ...record, anchor }) ?? null;
+  } catch (error) {
+    errorReason = `无法读取原始正文：${error.message}`;
   }
-
-  return result;
+  try {
+    if (record.state !== 'refused') observed = await targetAdapter?.read?.(readableSession, { ...record, anchor }) || {};
+  } catch (error) {
+    errorReason = `无法读取消息回执：${error.message}`;
+  }
+  const status = messageState(record, observed, targetMissing ? { reachable: false } : session, findReply(db, record));
+  const parent = record.replyTo ? db.prepare('SELECT fromId,toId FROM messages WHERE id=?').get(record.replyTo) : null;
+  const forwarded = parent && (record.fromId !== parent.toId || record.toId !== parent.fromId);
+  return {
+    ...status,
+    text,
+    answer: observed.answer?.trim() || null,
+    title: extractTitle(text, record.id),
+    reason: errorReason || status.reason || (forwarded ? '该消息发往其他会话，未计作原发送者收到的回信。' : null),
+  };
 }
 
 export function startDashboardServer({ config, adapters, port = 3721, host = '127.0.0.1', unref = true } = {}) {
@@ -141,14 +79,8 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
         try {
           const list = await adapter.list();
           for (const s of list) {
-            let model = s.model || '';
-            if (!model) {
-              if (s.client === 'antigravity') model = 'Gemini 3.8 Flash';
-              else if (s.client === 'codex') model = 'GPT-6.1 Sol';
-              else if (s.client === 'pi') model = 'Gemini 4 Carbon';
-            }
-
-            const resolvedState = s.state === 'running' ? 'running'
+            const resolvedState = s.reachable === false ? 'offline'
+              : s.state === 'running' ? 'running'
               : s.state === 'idle' ? 'idle'
               : s.state === 'offline' ? 'offline'
               : (s.idle === false ? 'running' : s.idle === true ? 'idle' : (s.state || 'unknown'));
@@ -156,7 +88,7 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
             const formatted = {
               id: s.id,
               client: s.client,
-              model,
+              model: s.model || null,
               workspace: s.project || s.workspace || '',
               state: resolvedState,
               reachable: s.reachable
@@ -166,11 +98,9 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
             if (!existing) {
               clientLatest.set(s.client, formatted);
             } else {
-              const isCurrentWs = (formatted.workspace || '').toLowerCase().includes('ameath');
-              const wasCurrentWs = (existing.workspace || '').toLowerCase().includes('ameath');
-              if (isCurrentWs && !wasCurrentWs) {
-                clientLatest.set(s.client, formatted);
-              } else if (isCurrentWs === wasCurrentWs && formatted.state !== 'offline' && existing.state === 'offline') {
+              const previous = list.find(item => item.id === existing.id);
+              if ((s.reachable === true && previous.reachable !== true)
+                || (s.reachable === previous.reachable && (s.updatedAt || 0) > (previous.updatedAt || 0))) {
                 clientLatest.set(s.client, formatted);
               }
             }
@@ -184,21 +114,23 @@ export function startDashboardServer({ config, adapters, port = 3721, host = '12
     const dbPath = path.join(config.data, 'messages.sqlite');
     const messages = [];
     if (fs.existsSync(dbPath)) {
-      const db = new DatabaseSync(dbPath);
+      const db = new DatabaseSync(dbPath, { readOnly: true });
       try {
         const rows = db.prepare('SELECT * FROM messages ORDER BY sentAt DESC LIMIT 60').all();
         for (const row of rows) {
-          const details = await resolveMessageDetails(row, adapterMap);
+          const details = await resolveMessageDetails(row, adapterMap, db);
           messages.push({
             id: row.id,
             fromClient: row.fromClient,
             toClient: row.toClient,
+            fromId: row.fromId,
+            toId: row.toId,
             sentAt: row.sentAt,
             chain: row.chain,
             pass: row.pass,
             kind: row.kind,
             replyTo: row.replyTo || undefined,
-            replyId: row.replyId || undefined,
+            replyId: details.replyId || undefined,
             state: details.state || row.state,
             title: details.title,
             text: details.text,

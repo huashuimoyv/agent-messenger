@@ -6,7 +6,7 @@ import https from 'node:https';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { canonical, rawId, entries, jsonLines, headRecords, tailOffset, textContent, envelopeMessageId, DeliveryError } from '../io.mjs';
+import { canonical, rawId, entries, jsonLines, headRecords, tailOffset, textContent, envelopeMessageId, messageBody, DeliveryError } from '../io.mjs';
 
 const execFileAsync = promisify(execFile);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -616,6 +616,17 @@ export class AntigravityAdapter {
         reason: 'Antigravity may have accepted the message, but its acknowledgement was not confirmed. Do not resend with a new request id.',
       };
     }
+  }
+
+  async readPrompt(session, message) {
+    const file = message.anchor?.path || session._file;
+    if (!file || !fs.existsSync(file)) return null;
+    for await (const { value } of jsonLines(file, message.anchor?.offset || 0)) {
+      if (value.type !== 'USER_INPUT' || value.source === 'SYSTEM') continue;
+      const body = messageBody(textContent(value.content), message.id);
+      if (body !== null) return body;
+    }
+    return null;
   }
 
   async read(session, message) {

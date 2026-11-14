@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { Journal } from './journal.mjs';
+import { messageState } from './message-state.mjs';
 import { canonical, rawId, DeliveryError, envelopeMessageId, waitForChange } from './io.mjs';
 
 const DEFAULT_CLIENTS = ['codex', 'antigravity', 'claude', 'deepseek', 'pi'];
@@ -181,7 +182,8 @@ export class Messenger {
     if (args.reply_to && (!reply || reply.toId !== from.id)) {
       throw new DeliveryError('reply_to must name a message received by this session.');
     }
-    const to = (args.to && args.to !== reply?.fromClient && args.to !== reply?.fromId ? args.to : null) || reply?.fromId || args.to;
+    const replyShorthand = reply && [reply.fromClient, `${reply.fromClient}:latest`].includes(args.to);
+    const to = reply && (!args.to || replyShorthand) ? reply.fromId : args.to;
     if (!to) throw new DeliveryError('Provide to, or reply_to for a message received by this session.');
     const target = await this.resolve(to, from);
     if (!target) throw new DeliveryError('Unknown session. Use an id from list_sessions.');
@@ -246,43 +248,30 @@ export class Messenger {
       session = await this.resolve(record.toId);
       if (session) {
         observed = await adapter.read(session, record);
-        const patch = {};
-        for (const field of ['state', 'reason', 'turn']) {
-          if (observed[field] !== undefined) patch[field] = observed[field];
-        }
-        if (observed.replyId && !record.replyId) patch.replyId = observed.replyId;
-
-        const hasCompletion = observed.state === 'done' || observed.state === 'replied' || observed.answer || observed.replyId || record.replyId;
-        const isOffline = session.reachable === false || session.ended || session.state === 'closed' || session.state === 'offline';
-        if (isOffline && !hasCompletion && !TERMINAL_STATES.has(record.state)) {
-          if (!TERMINAL_STATES.has(patch.state || record.state)) {
-            patch.state = 'expired';
-            patch.reason = observed.reason
-              ? `${observed.reason} (Target is offline; wait ended with delivery unconfirmed.)`
-              : 'Target session is offline or unreachable; wait ended with delivery unconfirmed.';
-          }
-        }
-
-        record = this.journal.update(record.id, patch);
       } else if (!TERMINAL_STATES.has(record.state)) {
-        // Target session is no longer discoverable or has ended
-        const patch = { state: 'expired', reason: 'Target session is no longer discoverable or has ended.' };
-        record = this.journal.update(record.id, patch);
+        observed = { state: 'expired', reason: 'Target session is no longer discoverable; waiting ended with delivery unconfirmed.' };
       }
     }
-    if (record.replyTo && !['refused', 'uncertain'].includes(record.state)) {
-      const parent = this.journal.get(record.replyTo);
-      if (parent?.fromId === record.toId) this.journal.settleReply(parent.id, record.id);
+    const status = messageState(record, observed, session, this.journal.reply(record));
+    const patch = {};
+    if (status.state !== record.state) patch.state = status.state;
+    if (observed.turn !== undefined) patch.turn = observed.turn;
+    if (status.reason !== record.reason) patch.reason = status.reason;
+    if (status.replyId !== record.replyId) patch.replyId = status.replyId;
+    record = this.journal.update(record.id, patch);
+    if (record.replyTo) {
+      this.journal.settleReply(record.replyTo, record.id);
     }
-    const state = record.replyId && !(record.state === 'done' && observed.answer) ? 'replied' : record.state;
+    const responseStatus = messageState(record, observed, session, this.journal.reply(record));
     return {
       session,
       record,
       response: {
         ...this.result(record),
-        state,
+        state: responseStatus.state,
+        ...(responseStatus.reason ? { reason: responseStatus.reason } : {}),
         to: record.toId,
-        reply: record.replyId || null,
+        reply: responseStatus.replyId,
         answer: observed.answer ?? null,
         sent_at: new Date(record.sentAt).toISOString(),
       },

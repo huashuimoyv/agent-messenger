@@ -192,7 +192,7 @@ ul,ol{list-style:none}
       <div><b>Agent Messenger</b><span>本地智能体互发</span></div>
     </div>
     <div class="top-right">
-      <span class="conn demo" id="conn"><i></i><span>示例数据</span></span>
+      <span class="conn demo" id="conn"><i></i><span>连接中</span></span>
       <button class="icon-btn" id="theme" title="切换主题" aria-label="切换主题"></button>
     </div>
   </header>
@@ -233,7 +233,7 @@ const STATE = {
   replied:   { label: '已回信', tone: 'ok',   cur: 4 },
   uncertain: { label: '待确认', tone: 'warn', cur: 1, fail: true },
   refused:   { label: '已拒绝', tone: 'err',  cur: 1, fail: true },
-  expired:   { label: '已过期', tone: 'err',  cur: 2, fail: true },
+  expired:   { label: '已结束等待', tone: 'warn', cur: 2, fail: true },
 };
 const ACTIVE = new Set(['queued', 'taken', 'started', 'uncertain']);
 const FILTERS = [
@@ -324,21 +324,23 @@ function buildChains(messages) {
     list.sort((a, b) => a.sentAt - b.sentAt);
     const first = list[0], last = list[list.length - 1];
     const active = [...list].reverse().find(m => ['queued', 'taken', 'started', 'uncertain'].includes(m.state));
-    const chainState = active ? active.state : (last.replyId ? 'replied' : last.state);
-    return { id, list, first, last, state: chainState, pass: Math.max(...list.map(x => x.pass)),
+    const focus = active || (['expired', 'refused'].includes(first.state) ? first : last);
+    const chainState = focus.state;
+    return { id, list, first, last, focus, state: chainState, pass: Math.max(...list.map(x => x.pass)),
       title: first.title || firstLine(first.text) || first.id, updated: last.sentAt };
   }).sort((a, b) => b.updated - a.updated);
 }
 
 /* ---------- state ---------- */
-const ui = { data: null, chains: [], filter: 'all', selected: null, live: false };
+const ui = { data: null, chains: [], filter: 'all', selected: null, live: false, disconnected: false };
 
 function setData(data, live) {
   ui.data = data; ui.live = live;
   ui.chains = buildChains(data.messages || []);
   if (!ui.selected && params.get('select')) ui.selected = params.get('select');
-  if (!ui.chains.some(c => c.id === ui.selected)) {
-    ui.selected = (ui.chains.find(c => ACTIVE.has(c.state) && c.state !== 'queued') || ui.chains[0] || {}).id || null;
+  const visible = visibleChains();
+  if (!visible.some(c => c.id === ui.selected)) {
+    ui.selected = (visible.find(c => ACTIVE.has(c.state) && c.state !== 'queued') || visible[0] || {}).id || null;
   }
   render();
 }
@@ -347,7 +349,8 @@ function setData(data, live) {
 function render() {
   const conn = $('#conn');
   conn.classList.toggle('demo', !ui.live);
-  conn.lastElementChild.textContent = ui.live ? `已连接 · ${POLL_MS / 1000}s 刷新` : '示例数据';
+  conn.lastElementChild.textContent = ui.live ? `已连接 · ${POLL_MS / 1000}s 刷新`
+    : ui.disconnected ? '连接已断开 · 显示上次数据' : '示例数据';
   renderAgents(); renderTabs(); renderTasks(); renderDetail();
 }
 
@@ -355,14 +358,14 @@ function renderAgents() {
   const sessions = ui.data.sessions || [];
   $('#agents').innerHTML = sessions.map(s => {
     const a = agent(s.client);
-    const mine = ui.chains.filter(c => c.last.toClient === s.client && ACTIVE.has(c.state)).length;
+    const mine = ui.chains.filter(c => c.focus.toClient === s.client && ACTIVE.has(c.state)).length;
     const lastTouch = ui.chains.find(c => c.list.some(m => m.fromClient === s.client || m.toClient === s.client));
-    const label = { idle: '空闲', running: '运行中', offline: '离线' }[s.state] || s.state;
+    const label = { idle: '空闲', running: '运行中', offline: '离线', unknown: '状态未知' }[s.state] || '状态未知';
     const note = mine ? `待处理 ${mine} 项` : lastTouch ? `最近 · <span data-rel="${lastTouch.updated}">${rel(lastTouch.updated)}</span>` : '暂无记录';
     return `<article class="agent ${esc(s.state)}">
       <div class="agent-top">
         ${av(s.client)}
-        <div class="agent-id"><b>${esc(a.name)}</b><span>${esc(s.model || s.title || s.id)}</span></div>
+        <div class="agent-id"><b>${esc(a.name)}</b><span>${esc(s.model || '模型未提供')}</span></div>
         <span class="status ${esc(s.state)}"><i></i>${esc(label)}</span>
       </div>
       <div class="agent-meta"><span class="mono">${esc(s.workspace || '')}</span><span>${note}</span></div>
@@ -419,12 +422,12 @@ function renderDetail() {
 
   const sub = [
     clock(c.first.sentAt, true),
-    s.cur >= 1 && !(s.fail && s.cur === 1) ? agent(c.last.toClient).name : (s.fail && s.cur === 1 ? s.label : ''),
-    c.state === 'started' ? `已运行 <span data-elapsed="${c.last.sentAt}">${elapsed(c.last.sentAt)}</span>` : c.state === 'taken' ? '等待开始' : (s.fail && s.cur === 2 ? s.label : ''),
+    s.cur >= 1 && !(s.fail && s.cur === 1) ? agent(c.focus.toClient).name : (s.fail && s.cur === 1 ? s.label : ''),
+    c.state === 'started' ? `已运行 <span data-elapsed="${c.focus.sentAt}">${elapsed(c.focus.sentAt)}</span>` : c.state === 'taken' ? '等待开始' : (s.fail && s.cur === 2 ? s.label : ''),
     s.cur >= 4 ? (c.list.length > 1 || c.state === 'replied' ? '已闭环' : s.label) : '',
   ];
   if (c.state === 'queued') sub[1] = '等待目标空闲';
-  if (c.state === 'expired') { sub[1] = '目标已断开'; sub[2] = '会话已结束'; }
+  if (c.state === 'expired') { sub[1] = '等待已结束'; sub[2] = '投递结果未确认'; }
   const steps = STEPS.map((name, i) => {
     let cls = 'pending', inner = '';
     if (i < s.cur) { cls = 'done'; inner = ICON.check; }
@@ -436,8 +439,8 @@ function renderDetail() {
   }).join('');
 
   const timeStat = active
-    ? `<label>${c.state === 'started' ? '已运行' : '已等待'}</label><strong data-elapsed="${c.last.sentAt}">${elapsed(c.last.sentAt)}</strong>`
-    : `<label>最后更新</label><strong>${clock(c.updated)}<span data-rel="${c.updated}">${rel(c.updated)}</span></strong>`;
+    ? `<label>${c.state === 'started' ? '已运行' : '已等待'}</label><strong data-elapsed="${c.focus.sentAt}">${elapsed(c.focus.sentAt)}</strong>`
+    : `<label>最后消息</label><strong>${clock(c.updated)}<span data-rel="${c.updated}">${rel(c.updated)}</span></strong>`;
 
   const tl = c.list.map(m => {
     const ms = st(m.state);
@@ -445,7 +448,7 @@ function renderDetail() {
       ${av(m.fromClient, 1)}
       <div class="tl-head"><b>${esc(agent(m.fromClient).name)}</b><span class="to">→ ${esc(agent(m.toClient).name)}</span><span class="pill">${ms.label}</span><time>${clock(m.sentAt, true)}</time></div>
       <div class="tl-sub mono">${esc(m.id)} · 第 ${m.pass} 轮${m.replyTo ? ' · 回复 ' + esc(m.replyTo) : ''}</div>
-      ${m.text ? `<div class="tl-text">${esc(m.text)}</div>` : ''}
+      <div class="tl-text">${esc(m.text || '原始正文不可读')}</div>
       ${m.reason ? `<div class="tl-reason">${esc(m.reason)}</div>` : ''}
       ${m.answer ? `<div class="tl-answer"><label>最终回答</label>${esc(m.answer)}</div>` : ''}
     </li>`;
@@ -482,7 +485,7 @@ $('#tabs').addEventListener('click', e => {
   const b = e.target.closest('[data-f]'); if (!b) return;
   ui.filter = b.dataset.f;
   const list = visibleChains();
-  if (!list.some(c => c.id === ui.selected) && list[0]) ui.selected = list[0].id;
+  if (!list.some(c => c.id === ui.selected)) ui.selected = list[0]?.id || null;
   renderTabs(); renderTasks(); renderDetail();
 });
 $('#tasks').addEventListener('click', e => {
@@ -523,8 +526,12 @@ async function load() {
   try {
     const r = await fetch(ENDPOINT, { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status);
+    ui.disconnected = false;
     setData(await r.json(), true);
-  } catch { if (!ui.data) setData(demo(), false); }
+  } catch {
+    ui.disconnected = true;
+    setData(ui.data || { passLimit: 10, sessions: [], messages: [] }, false);
+  }
 }
 if (location.protocol.startsWith('http')) { load(); setInterval(load, POLL_MS); }
 else setData(demo(), false);

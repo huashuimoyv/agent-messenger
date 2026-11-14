@@ -15,6 +15,24 @@ export function envelopeMessageId(text) {
   return first.startsWith('[Agent Messenger · ') ? first.match(/ · (m-[A-Za-z0-9_-]+)(?: · re m-[A-Za-z0-9_-]+)?\]$/)?.[1] || null : null;
 }
 
+// A native input can contain several queued envelopes. Never borrow its first
+// user message, or a different envelope's body, for the requested message id.
+export function messageBody(text, id) {
+  const lines = String(text || '').replace(/<USER_REQUEST>/g, '\n')
+    .replace(/<\/USER_REQUEST>/g, '\n</USER_REQUEST>\n').split(/\r?\n/);
+  const start = lines.findIndex(line => envelopeMessageId(line.trim()) === id);
+  if (start === -1) return null;
+  const body = [];
+  for (const line of lines.slice(start + 1)) {
+    const trimmed = line.trim();
+    if (trimmed === '</USER_REQUEST>' || envelopeMessageId(trimmed)) break;
+    if ((trimmed.startsWith('Reply using ') || trimmed.startsWith('This answers '))
+      && trimmed.includes(`reply_to: ${id}.`)) break;
+    body.push(line);
+  }
+  return body.join('\n').trim();
+}
+
 export function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }

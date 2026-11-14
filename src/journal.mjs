@@ -2,19 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DeliveryError } from './io.mjs';
+import { canTransition, isReplyFor } from './message-state.mjs';
+export { canTransition } from './message-state.mjs';
 
-const NON_TERMINAL_PROGRESS = { uncertain: 0, queued: 1, taken: 2, started: 3 };
-
-export function canTransition(oldState, newState) {
-  if (!oldState || oldState === newState) return true;
-  if (oldState === 'replied') return false;
-  if (oldState === 'refused') return false;
-  if (oldState === 'done') return newState === 'replied';
-  if (oldState === 'expired') {
-    return ['done', 'replied', 'refused'].includes(newState);
-  }
-  if (['done', 'replied', 'refused', 'expired'].includes(newState)) return true;
-  return (NON_TERMINAL_PROGRESS[newState] ?? 0) >= (NON_TERMINAL_PROGRESS[oldState] ?? 0);
+export function findReply(db, record) {
+  const row = db.prepare(`SELECT * FROM messages WHERE replyTo=? AND fromId=? AND toId=?
+    AND state IN ('queued','taken','started','done','replied')
+    ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END,sentAt,rowid LIMIT 1`)
+    .get(record.id, record.toId, record.fromId, record.replyId || '');
+  return row ? { ...row, anchor: JSON.parse(row.anchor) } : null;
 }
 
 const ALLOWED_PATCH_FIELDS = new Set(['state', 'reason', 'anchor', 'turn', 'replyId', 'toId']);
@@ -41,7 +37,7 @@ export class Journal {
       get: this.db.prepare('SELECT * FROM messages WHERE id=?'),
       request: this.db.prepare('SELECT * FROM messages WHERE requestKey=?'),
       received: this.db.prepare('SELECT * FROM messages WHERE toId=? AND state<>? ORDER BY sentAt DESC,rowid DESC'),
-      settleReply: this.db.prepare('UPDATE messages SET replyId=COALESCE(replyId,?) WHERE id=?'),
+      settleReply: this.db.prepare('UPDATE messages SET replyId=? WHERE id=? AND replyId IS ?'),
     };
   }
 
@@ -54,6 +50,7 @@ export class Journal {
   decode(row) { return row ? { ...row, anchor: JSON.parse(row.anchor) } : null; }
   get(id) { return this.decode(this.#stmts.get.get(id)); }
   request(key) { return this.decode(this.#stmts.request.get(key)); }
+  reply(record) { return findReply(this.db, record); }
   received(to) { return this.#stmts.received.all(to, 'refused').map(r => this.decode(r)); }
   watchTargets() { return [this.walPath, this.dbPath]; }
 
@@ -92,7 +89,10 @@ export class Journal {
       const old = this.get(id);
       const next = { ...patch };
       if (old && next.state) {
-        if (!canTransition(old.state, next.state)) {
+        const repairingInvalidReply = old.state === 'replied'
+          && ['expired', 'done'].includes(next.state) && !this.reply(old);
+        if (repairingInvalidReply) next.replyId = null;
+        if (!canTransition(old.state, next.state) && !repairingInvalidReply) {
           delete next.state;
           delete next.reason;
         }
@@ -111,6 +111,9 @@ export class Journal {
   }
 
   settleReply(parent, reply) {
-    this.#stmts.settleReply.run(reply, parent);
+    const record = this.get(parent), child = this.get(reply);
+    if (!record || !isReplyFor(record, child)) return;
+    if (record.replyId && isReplyFor(record, this.get(record.replyId))) return;
+    this.#stmts.settleReply.run(reply, parent, record.replyId);
   }
 }

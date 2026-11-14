@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { envelopeMessageId, textContent } from '../io.mjs';
+import { envelopeMessageId, textContent, messageBody } from '../io.mjs';
 
 function history(home, missing, read) {
   const file = path.join(home, 'thread_history_1.sqlite');
@@ -49,5 +49,17 @@ export function readHistory(home, session, message) {
       ? db.prepare('SELECT item_json FROM thread_items WHERE thread_id=? AND turn_id=? AND item_id=?').get(session.rawId, turnId, turn.final_agent_item_id) : null;
     return { state: 'done', turn: turnId, answer: final ? JSON.parse(final.item_json).text || null : null,
       ...(turn.status === 'completed' ? {} : { reason: `Codex turn ended with status ${turn.status}.` }) };
+  });
+}
+
+export function readHistoryPrompt(home, session, message) {
+  return history(home, null, db => {
+    const rows = db.prepare(`SELECT item_json FROM thread_items WHERE thread_id=?
+      AND item_type='userMessage' AND rollout_ordinal>? ORDER BY rollout_ordinal`);
+    for (const row of rows.iterate(session.rawId, message.anchor?.ordinal ?? -1)) {
+      const body = messageBody(textContent(JSON.parse(row.item_json).content), message.id);
+      if (body !== null) return body;
+    }
+    return null;
   });
 }

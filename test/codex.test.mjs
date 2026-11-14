@@ -141,6 +141,11 @@ test('capture anchors at the last complete line and read waits for the exact tur
   assert.equal(reply.state, 'done');
   assert.equal(reply.answer, 'The final answer.');
   assert.equal(reply.turn, 'turn-2');
+  const current = await adapter.get(THREAD);
+  assert.equal(await adapter.readPrompt(current, { id: 'm-wanted', anchor }), 'Review this.');
+  assert.equal(await adapter.readPrompt({ ...current, file: path.join(f.root, 'missing.jsonl') }, { id: 'm-wanted', anchor }), 'Review this.');
+  const replacement = path.join(f.root, 'replacement.jsonl'); fs.copyFileSync(file, replacement);
+  assert.equal(await adapter.readPrompt({ ...current, file: replacement }, { id: 'm-wanted', anchor: { path: file, offset: 1_000_000 } }), 'Review this.');
 });
 
 test('current prompt is bound to the requested Codex turn', async t => {

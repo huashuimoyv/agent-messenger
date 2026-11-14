@@ -64,9 +64,9 @@ test('reply ownership and sender ownership; explicit and final answer survive ot
   assert.equal(got.state, 'replied'); assert.equal(got.reply, reply.id);
   f.answers.set(original.id, { state: 'done', answer: 'exact turn answer', turn: 'turn-1' });
   got = await f.second.get({ id: original.id }, f.meta('a'));
-  assert.equal(got.state, 'done'); assert.equal(got.answer, 'exact turn answer'); assert.equal(got.reply, reply.id);
+  assert.equal(got.state, 'replied'); assert.equal(got.answer, 'exact turn answer'); assert.equal(got.reply, reply.id);
   f.first.journal.update(original.id, { state: 'queued' });
-  assert.equal(f.first.journal.get(original.id).state, 'done');
+  assert.equal(f.first.journal.get(original.id).state, 'replied');
 });
 
 test('identity comes from MCP metadata, not a model-written argument', () => {

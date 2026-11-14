@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { historyState, captureHistory, currentHistory, readHistory } from '../src/adapters/codex-history.mjs';
+import { historyState, captureHistory, currentHistory, readHistory, readHistoryPrompt } from '../src/adapters/codex-history.mjs';
 import { CodexAdapter } from '../src/adapters/codex.mjs';
 
 const id = '11111111-2222-4333-8444-555555555555';
@@ -28,6 +28,8 @@ test('paginated replies bind the exact envelope turn and final item', t => {
   f.turn('target', 4, 'completed', '[Agent Messenger · m-paged]\nquestion', 'correct answer');
   f.turn('other', 7, 'completed', 'later user message', 'wrong later answer');
   assert.deepEqual(readHistory(f.home, { rawId: id }, { id: 'm-paged', anchor }), { state: 'done', turn: 'target', answer: 'correct answer' });
+  assert.equal(readHistoryPrompt(f.home, { rawId: id }, { id: 'm-paged', anchor }), 'question');
+  assert.equal(readHistoryPrompt(f.home, { rawId: id }, { id: 'm-absent', anchor }), null);
   assert.equal(currentHistory(f.home, id, 'target').turnId, 'target');
   assert.equal(currentHistory(f.home, id).turnId, 'other');
   assert.equal(currentHistory(f.home, id, 'missing'), null);
